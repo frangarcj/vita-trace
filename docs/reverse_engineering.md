@@ -142,8 +142,13 @@ counters exist: the cycle counter plus six programmable ones.
   under taiHEN and hooking the scheduler; neither has been attempted.
 - Whether ScePamgr's ARM/counter trace carries context-switch information at
   all — unanswerable until one of those two paths works.
-- PMU counter semantics across context switches, and how many programmable
-  counters are actually usable.
+- Whether retail firmware enables userland PMU access at all, i.e. what
+  `sceKernelGetPMUSERENR()` returns on a console. A linear disassembly sweep
+  of the 3.60 kernel for writes to PMUSERENR produced only false positives
+  from decoding data as code, so this is not answerable that way; the client
+  reads it at startup instead.
+- PMU counter semantics across context switches, and whether all six
+  programmable counters plus the cycle counter are really usable.
 - The unit of the 333 the timebase frequency call returns.
 - Firmware drift: NIDs/structs used by kernel-side RE code must be pinned per
   firmware branch (`kernel/platform/fw_360.c`, `fw_365.c`, ...).
