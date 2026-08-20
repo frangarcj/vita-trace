@@ -37,7 +37,8 @@ themselves.
 ## ScePamgr was removed from retail firmware in 3.50
 
 Established on 2026-08-21 by disassembling decrypted firmware, with no
-hardware involved. This closes the design's central phase-3 hypothesis.
+hardware involved. This reshapes the design's central phase-3 hypothesis and
+fixes a bug that would otherwise have surfaced only on a console.
 
 `scePerfGetTimebaseFrequency` is not a function in its own right. In
 `vs0/sys/external/libperf`, on both 3.60 and the 3.74 module Vita3K bundles,
@@ -98,13 +99,13 @@ sidesteps it, and a bring-up run on hardware will report the measured value.
 
 ## Open items from the design (validate on CEX or resolve via RE)
 
-- PC sampling without suspending the target thread: ScePamgr ARM trace is the
-  first hypothesis (Anexo B, `pamgr-arm`); real hardware is required since
-  Vita3K's ScePamgr is a stub.
-- Whether ScePamgr's ARM/counter trace carries context-switch information, or
-  whether a ThreadMgr hook is needed instead.
+- PC sampling without suspending the target thread. ScePamgr is absent from
+  3.60/3.65, so this is now a choice between porting the 3.36 module forward
+  under taiHEN and hooking the scheduler; neither has been attempted.
+- Whether ScePamgr's ARM/counter trace carries context-switch information at
+  all — unanswerable until one of those two paths works.
 - PMU counter semantics across context switches, and how many programmable
   counters are actually usable.
-- Whether ScePerf and ScePamgr share a clock domain.
+- The unit of the 333 the timebase frequency call returns.
 - Firmware drift: NIDs/structs used by kernel-side RE code must be pinned per
   firmware branch (`kernel/platform/fw_360.c`, `fw_365.c`, ...).
