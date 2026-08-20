@@ -124,6 +124,10 @@ int vitaTracyRegister(const VitaTracyRegisterArgs *args) {
     st->target_pid = target_pid;
     st->sampling_hz = VITA_TRACE_DEFAULT_SAMPLE_HZ;
 
+    /* Proves to the client that the call reached the kernel rather than a
+     * weak import stub standing in for an absent plugin. */
+    vita_trace_shared_acknowledge(shared);
+
     VitaTraceControlRecord record;
     memset(&record, 0, sizeof(record));
     record.type = VITA_TRACE_CLOCK_SYNC;

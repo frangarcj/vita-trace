@@ -6,8 +6,8 @@ add_executable(tracy_kernel
     sampler_debug_fallback.c
     sampler_pamgr.c
     service.c
-    shared_layout.c
-    shared_ring.c
+    ${CMAKE_SOURCE_DIR}/common/shared_layout.c
+    ${CMAKE_SOURCE_DIR}/common/shared_ring.c
     state.c
 )
 
@@ -51,4 +51,11 @@ set_target_properties(tracy_kernel PROPERTIES
 vita_create_self(tracy_kernel.skprx tracy_kernel
     CONFIG exports.yml
     UNSAFE
+)
+
+# Userland calls the control ABI through syscalls, so the stub library is
+# generated from the same exports the module publishes.
+vita_create_stubs(tracy_kernel_stubs tracy_kernel
+    ${CMAKE_CURRENT_SOURCE_DIR}/exports.yml
+    KERNEL
 )

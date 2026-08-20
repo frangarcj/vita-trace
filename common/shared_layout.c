@@ -36,6 +36,7 @@ int vita_trace_shared_init(void *mem, size_t mem_size, uint32_t target_pid, uint
     }
 
     VitaTraceSharedHeader *hdr = (VitaTraceSharedHeader *)mem;
+    hdr->kernel_ack = 0;
     hdr->abi_version = VITA_TRACY_ABI_VERSION;
     hdr->target_pid = target_pid;
     hdr->timebase_hz = timebase_hz;
@@ -77,6 +78,22 @@ int vita_trace_shared_is_valid(const void *mem) {
         return 0;
     }
     return hdr->abi_version == VITA_TRACY_ABI_VERSION;
+}
+
+void vita_trace_shared_acknowledge(void *mem) {
+    if (!vita_trace_shared_is_valid(mem)) {
+        return;
+    }
+    VitaTraceSharedHeader *hdr = (VitaTraceSharedHeader *)mem;
+    __atomic_store_n(&hdr->kernel_ack, VITA_TRACE_KERNEL_ACK, __ATOMIC_RELEASE);
+}
+
+int vita_trace_shared_is_acknowledged(const void *mem) {
+    if (!vita_trace_shared_is_valid(mem)) {
+        return 0;
+    }
+    const VitaTraceSharedHeader *hdr = (const VitaTraceSharedHeader *)mem;
+    return __atomic_load_n(&hdr->kernel_ack, __ATOMIC_ACQUIRE) == VITA_TRACE_KERNEL_ACK;
 }
 
 void *vita_trace_shared_core_ring(void *mem, uint32_t cpu) {

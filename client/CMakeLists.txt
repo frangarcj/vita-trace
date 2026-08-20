@@ -1,9 +1,13 @@
 add_library(tracy_vita STATIC
     ${CMAKE_SOURCE_DIR}/third_party/tracy/public/TracyClient.cpp
+    ${CMAKE_SOURCE_DIR}/common/shared_layout.c
+    ${CMAKE_SOURCE_DIR}/common/shared_ring.c
+    clock_sync.c
     timebase_convert.c
     tracy_vita_alloc.cpp
     tracy_vita_platform.cpp
     tracy_vita_init.cpp
+    tracy_vita_kernel_bridge.cpp
     tracy_vita_time.cpp
 )
 
@@ -32,10 +36,18 @@ target_compile_definitions(tracy_vita PRIVATE
     TRACY_SYMBOL_OFFLINE_RESOLVE
 )
 
+# The control ABI is imported weakly so an instrumented application still
+# loads and runs when tracy_kernel.skprx is absent.
+set(VITA_TRACY_KERNEL_STUB
+    ${CMAKE_BINARY_DIR}/kernel/tracy_kernel_stubs/libVitaTracyKernel_stub_weak.a)
+
 target_link_libraries(tracy_vita PUBLIC
+    ${VITA_TRACY_KERNEL_STUB}
     ScePerf_stub
     SceNet_stub
     SceNetCtl_stub
     SceSysmodule_stub
     pthread
 )
+
+add_dependencies(tracy_vita tracy_kernel_stubs)

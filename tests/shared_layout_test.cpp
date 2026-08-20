@@ -197,3 +197,38 @@ TEST_CASE("offsets resolve against whichever base the caller holds") {
     CHECK(vita_trace_ring_try_pop(relocated_ring, &out) == 1);
     CHECK(out.pc == 0x5A5A5A5Au);
 }
+
+TEST_CASE("a fresh block is not acknowledged") {
+    auto mem = make_shared_block();
+    CHECK(vita_trace_shared_is_acknowledged(mem.data()) == 0);
+}
+
+TEST_CASE("acknowledgement is visible to the other side") {
+    // Stands in for the kernel writing through its own mapping while the
+    // client reads through the process mapping.
+    auto mem = make_shared_block();
+    vita_trace_shared_acknowledge(mem.data());
+    CHECK(vita_trace_shared_is_acknowledged(mem.data()) == 1);
+}
+
+TEST_CASE("acknowledging leaves the rings untouched") {
+    auto mem = make_shared_block();
+    vita_trace_shared_acknowledge(mem.data());
+
+    CHECK(vita_trace_shared_is_valid(mem.data()) == 1);
+    void *ring = vita_trace_shared_core_ring(mem.data(), 0);
+    REQUIRE(ring != nullptr);
+    CHECK(vita_trace_ring_pending(ring) == 0);
+
+    VitaTraceSample sample{};
+    sample.pc = 0x1234u;
+    CHECK(vita_trace_ring_try_push(ring, &sample) == 1);
+}
+
+TEST_CASE("an unacknowledged block is still a valid block") {
+    // The distinction matters: a valid block with no acknowledgement means
+    // the plugin is absent, not that the memory is corrupt.
+    auto mem = make_shared_block();
+    CHECK(vita_trace_shared_is_valid(mem.data()) == 1);
+    CHECK(vita_trace_shared_is_acknowledged(mem.data()) == 0);
+}

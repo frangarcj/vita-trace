@@ -19,12 +19,22 @@ extern "C" {
 
 #define VITA_TRACE_SHARED_MAGIC 0x56545348u /* "VTSH" */
 
+/* Written into the header by the kernel while it services a register call.
+ *
+ * The kernel backend is optional, so the client links its control ABI as
+ * weak imports and the module may simply not be loaded. What an unresolved
+ * weak import returns is not documented, so a zero return is not proof the
+ * call reached the kernel; this acknowledgement is, because only the kernel
+ * can write into the mapping. */
+#define VITA_TRACE_KERNEL_ACK 0x4B41434Bu /* "KACK" */
+
 /* Rings are separated by a cache line so producers on different cores do
  * not share one. */
 #define VITA_TRACE_SHARED_ALIGN 64u
 
 typedef struct VitaTraceSharedHeader {
     uint32_t magic;
+    uint32_t kernel_ack;
     uint32_t abi_version;
     uint32_t target_pid;
     uint32_t timebase_hz;
@@ -48,6 +58,13 @@ int vita_trace_shared_init(void *mem, size_t mem_size, uint32_t target_pid, uint
 
 /* Checks magic and ABI version before a consumer trusts the block. */
 int vita_trace_shared_is_valid(const void *mem);
+
+/* Records that the kernel has taken the block. Called from the kernel side
+ * of a register call. */
+void vita_trace_shared_acknowledge(void *mem);
+
+/* True once the kernel has acknowledged this block. */
+int vita_trace_shared_is_acknowledged(const void *mem);
 
 /* Ring accessors. `mem` is whichever mapping the caller holds; both sides
  * pass their own base. Return NULL for an out-of-range cpu or an invalid
