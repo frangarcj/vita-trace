@@ -12,8 +12,12 @@ unset(CMAKE_POLICY_VERSION_MINIMUM)
 add_executable(vita_tracy_tests
     main.cpp
     shared_ring_test.cpp
+    shared_layout_test.cpp
+    state_test.cpp
     timebase_test.cpp
+    ${CMAKE_SOURCE_DIR}/kernel/shared_layout.c
     ${CMAKE_SOURCE_DIR}/kernel/shared_ring.c
+    ${CMAKE_SOURCE_DIR}/kernel/state.c
     ${CMAKE_SOURCE_DIR}/client/timebase_convert.c
 )
 

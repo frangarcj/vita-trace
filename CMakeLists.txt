@@ -26,5 +26,6 @@ else()
     vita_tracy_apply_patches()
 
     add_subdirectory(client)
+    add_subdirectory(kernel)
     add_subdirectory(samples/zones)
 endif()

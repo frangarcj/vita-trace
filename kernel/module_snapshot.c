@@ -1,0 +1,57 @@
+#include <psp2kern/kernel/modulemgr.h>
+#include <psp2kern/kernel/sysclib.h>
+
+#include "internal.h"
+#include "vita_tracy/kernel_abi.h"
+
+#define VITA_TRACY_MAX_MODULES 96
+
+/* The Vita only reports addresses and mappings; names and lines are
+ * resolved on the PC from the ELF, so this emits the module base/size table
+ * needed to turn a sampled PC into a module-relative offset. */
+int vita_tracy_modules_snapshot(VitaTracyKernelState *st, SceUID pid) {
+    SceUID modids[VITA_TRACY_MAX_MODULES];
+    SceSize count = VITA_TRACY_MAX_MODULES;
+
+    int ret = ksceKernelGetModuleList(pid, 0x7FFFFFFF, 1, modids, &count);
+    if (ret < 0) {
+        return VITA_TRACY_ERROR_ARGS;
+    }
+
+    uint64_t now = vita_tracy_kernel_now();
+
+    for (SceSize i = 0; i < count; ++i) {
+        SceKernelModuleInfo info;
+        memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+
+        if (ksceKernelGetModuleInfo(pid, modids[i], &info) < 0) {
+            continue;
+        }
+
+        VitaTraceControlRecord record;
+        memset(&record, 0, sizeof(record));
+        record.type = VITA_TRACE_MODULE_SNAPSHOT;
+        record.timestamp = now;
+        record.payload.module_snapshot.pid = (uint32_t)pid;
+        strncpy(record.payload.module_snapshot.module_name, info.module_name,
+                          VITA_TRACE_MODULE_NAME_MAX - 1);
+
+        uint32_t segment_count = 0;
+        for (uint32_t seg = 0; seg < VITA_TRACE_MODULE_MAX_SEGMENTS; ++seg) {
+            if (info.segments[seg].memsz == 0) {
+                continue;
+            }
+            record.payload.module_snapshot.segments[segment_count].vaddr =
+                (uint32_t)(uintptr_t)info.segments[seg].vaddr;
+            record.payload.module_snapshot.segments[segment_count].memsz = info.segments[seg].memsz;
+            record.payload.module_snapshot.segments[segment_count].perm = info.segments[seg].perms;
+            segment_count++;
+        }
+        record.payload.module_snapshot.segment_count = segment_count;
+
+        vita_tracy_emit_control(st, &record);
+    }
+
+    return VITA_TRACY_OK;
+}
