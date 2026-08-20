@@ -1,0 +1,15 @@
+diff --git a/public/client/TracyProfiler.hpp b/public/client/TracyProfiler.hpp
+index 2a564afc..2ea3a43e 100644
+--- a/public/client/TracyProfiler.hpp
++++ b/public/client/TracyProfiler.hpp
+@@ -330,7 +330,9 @@ public:
+ #endif
+ 
+ #if !defined TRACY_HW_TIMER || defined TRACY_TIMER_FALLBACK
+-#  if defined __linux__ && defined CLOCK_MONOTONIC_RAW
++#  if defined TRACY_PLATFORM_GET_TIME
++        return TRACY_PLATFORM_GET_TIME();
++#  elif defined __linux__ && defined CLOCK_MONOTONIC_RAW
+         struct timespec ts;
+         clock_gettime( CLOCK_MONOTONIC_RAW, &ts );
+         return int64_t( ts.tv_sec ) * 1000000000ll + int64_t( ts.tv_nsec );

@@ -18,7 +18,13 @@ if(VITA_TRACY_BUILD_HOST_TESTS)
 else()
     include("${VITASDK}/share/vita.cmake" REQUIRED)
 
+    if(NOT EXISTS "${CMAKE_SOURCE_DIR}/third_party/tracy/public/TracyClient.cpp")
+        message(FATAL_ERROR "Tracy submodule is missing; run: git submodule update --init --recursive")
+    endif()
+
+    include(cmake/VitaTracyPatches.cmake)
+    vita_tracy_apply_patches()
+
     add_subdirectory(client)
-    add_subdirectory(kernel)
     add_subdirectory(samples/zones)
 endif()
