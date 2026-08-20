@@ -1,0 +1,10 @@
+/Vita_Tracy_Implementation_v0.1.md
+build/
+build-*/
+*.self
+*.skprx
+*.suprx
+*.vpk
+*.elf
+CMakeCache.txt
+CMakeFiles/
