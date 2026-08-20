@@ -34,6 +34,15 @@ This does not change any status in the matrices below — it is a note on
 *where* validation can happen, not a substitute for the CEX/RE items
 themselves.
 
+**A trap the emulator hides.** Vita3K binds an import it does not recognise
+to its own logging stub, so calling one returns cleanly and logs a line. Real
+firmware does not: an unresolved weak import keeps the sixteen bytes the
+toolchain emitted — `[version|flags, library NID, function NID, padding]` —
+and calling it executes the NIDs as instructions. A run that passes under
+Vita3K therefore proves nothing about whether optional imports are safe to
+call, which is why the bridge inspects the stub header rather than trusting
+a return value.
+
 ## ScePamgr was removed from retail firmware in 3.50
 
 Established on 2026-08-21 by disassembling decrypted firmware, with no
