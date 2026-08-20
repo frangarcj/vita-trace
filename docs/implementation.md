@@ -2,15 +2,15 @@
 
 Nothing here has run on a PS Vita yet. Everything below builds with the
 VitaSDK toolchain and the platform-independent logic is covered by the host
-test suite, but no claim about runtime behaviour has been verified on
-hardware. `docs/reverse_engineering.md` explains why the emulator cannot
-stand in for that.
+test suite. The userland client has additionally been run end to end under
+Vita3K (see below); the kernel backend cannot be, for the reasons in
+`docs/reverse_engineering.md`.
 
 ## Phase status
 
 | Phase | State | Notes |
 |---|---|---|
-| 0 — Bring-up | Built | `libtracy_vita.a` links against a pinned Tracy, and the zones sample produces a `.vpk`. Viewer handshake unverified. |
+| 0 — Bring-up | Verified under emulation | Handshake, zones, nesting and frames confirmed against a real Tracy capture from Vita3K. |
 | 1 — Kernel bridge | Built | ABI v1, per-core SPSC rings, `ksceKernelProcUserMap`, process-event cleanup, module snapshots. |
 | 2 — Provisional samples | Built | Suspend/read/resume sampler, injected into Tracy as callstack samples. Offline symbolication in `tools/symbol_map.py`. |
 | 3 — Non-intrusive sampling | Blocked | ScePamgr does not exist on retail firmware, so the design's primary hypothesis is out; a kernel hook is the remaining option. |
@@ -56,8 +56,8 @@ kernel therefore writes an acknowledgement into the shared header during
 
 ## What still needs hardware
 
-- Whether the Tracy viewer completes a handshake over Wi-Fi and holds a
-  session.
+- Whether the handshake works over Wi-Fi rather than a host loopback, and
+  holds a session for the 30+ minutes the design asks for.
 - The two suspend/resume status values in
   `kernel/sampler_debug_fallback.c`, which come from documentation notes
   rather than measurement.
@@ -69,6 +69,25 @@ kernel therefore writes an acknowledgement into the shared header during
   survive context switches.
 - A non-intrusive sampling source. ScePamgr is ruled out (see
   `docs/reverse_engineering.md`), which leaves a kernel hook.
+
+## What the emulator run showed
+
+Running `samples/zones` under Vita3K and capturing with `tracy-capture` from
+the pinned Tracy commit produced a real trace: 293 frames and 870 zones over
+10.1 s, with source file and line intact.
+
+The numbers are consistent with the workload rather than merely present.
+`HotWork` runs ten times the loop iterations of `ColdWork`, and the capture
+measured a 9.4:1 ratio between them (14.30 ms against 1.52 ms mean).
+`Frame` came out at 15.88 ms against the 15.82 ms its two children sum to,
+so nesting and the clock agree.
+
+That exercises the platform header, the allocator and thread-id hooks, the
+ScePerf timebase patch, the SceNet socket path and the protocol handshake.
+It says nothing about the kernel backend, and the emulator supplies its own
+ScePerf, so the timebase behaviour it demonstrates is not the hardware's.
+Reported timer resolution was 1.37 us, which is emulated call overhead, not
+the counter's real granularity.
 
 ## Overhead
 
