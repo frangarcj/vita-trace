@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.16)
 
 option(VITA_TRACY_BUILD_HOST_TESTS "Build host-native unit tests instead of Vita targets" OFF)
 
+# Collect only while a viewer is attached. Without this Tracy buffers from
+# process start, which on a console means the queue grows for as long as
+# nobody is watching, and a capture is lost entirely if the app exits before
+# anyone connects.
+option(VITA_TRACY_ON_DEMAND "Only collect while a viewer is connected" ON)
+
 if(NOT VITA_TRACY_BUILD_HOST_TESTS AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
     if(DEFINED ENV{VITASDK})
         set(CMAKE_TOOLCHAIN_FILE "$ENV{VITASDK}/share/vita.toolchain.cmake" CACHE PATH "toolchain file")

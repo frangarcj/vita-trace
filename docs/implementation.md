@@ -13,7 +13,7 @@ stand in for that.
 | 0 — Bring-up | Built | `libtracy_vita.a` links against a pinned Tracy, and the zones sample produces a `.vpk`. Viewer handshake unverified. |
 | 1 — Kernel bridge | Built | ABI v1, per-core SPSC rings, `ksceKernelProcUserMap`, process-event cleanup, module snapshots. |
 | 2 — Provisional samples | Built | Suspend/read/resume sampler, injected into Tracy as callstack samples. Offline symbolication in `tools/symbol_map.py`. |
-| 3 — Non-intrusive sampling | Not started | Blocked on reverse engineering; `kernel/sampler_pamgr.c` reports unsupported. |
+| 3 — Non-intrusive sampling | Blocked | ScePamgr does not exist on retail firmware, so the design's primary hypothesis is out; a kernel hook is the remaining option. |
 | 4 — PMU | Partial | ScePerf counters and plots are implemented client-side. The privileged kernel path is not. |
 | 5 — Callstacks | Phase A only | Samples carry a single PC. LR, stack snapshots and offline unwinding are not implemented. |
 | 6 — GPU / Razor | Not started | — |
@@ -61,12 +61,14 @@ kernel therefore writes an acknowledgement into the shared header during
 - The two suspend/resume status values in
   `kernel/sampler_debug_fallback.c`, which come from documentation notes
   rather than measurement.
+- The rate the ScePerf timebase counter advances at. The client measures it
+  at startup, and a bring-up run should report what it measured.
 - Whether ScePerf and the kernel timebase drift apart over a long session,
   and how large the clock-sync error actually is.
 - How many PMU counters the firmware leaves programmable, and whether they
   survive context switches.
-- Everything in phase 3: the design's central open question is whether
-  ScePamgr can deliver PC samples without stopping the target.
+- A non-intrusive sampling source. ScePamgr is ruled out (see
+  `docs/reverse_engineering.md`), which leaves a kernel hook.
 
 ## Overhead
 

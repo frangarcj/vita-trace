@@ -19,10 +19,16 @@ target_include_directories(tracy_vita PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
+# These take part in Tracy's configuration name mangling, so the library and
+# everything linking it must agree on them.
 target_compile_definitions(tracy_vita PUBLIC
     TRACY_ENABLE
     TRACY_PLATFORM_HEADER="tracy_vita_platform.hpp"
 )
+
+if(VITA_TRACY_ON_DEMAND)
+    target_compile_definitions(tracy_vita PUBLIC TRACY_ON_DEMAND)
+endif()
 
 # Tracy's discovery broadcast, system tracing, native sampling and source
 # transfer all assume APIs the Vita does not have; sampling and context
