@@ -34,7 +34,7 @@ This does not change any status in the matrices below — it is a note on
 *where* validation can happen, not a substitute for the CEX/RE items
 themselves.
 
-## ScePamgr does not exist on retail firmware
+## ScePamgr was removed from retail firmware in 3.50
 
 Established on 2026-08-21 by disassembling decrypted firmware, with no
 hardware involved. This closes the design's central phase-3 hypothesis.
@@ -53,17 +53,29 @@ scePerfGetTimebaseFrequency:
 Every retail 3.60 module was scanned for a provider of that library —
 `os0/kd` (46), `os0/kd/bootimage` (56) and `vs0/sys/external` (141), 299
 files, every one parsed successfully — and **nothing exports `ScePamgr`
-(0xAB606F3F) or `ScePamgrForDriver` (0xA41B0AAF)**. The module that does
-export them, `os0/kd/pamgr.elf`, is present only on prototype firmware
-(checked against 1.691.011), alongside the `deci4p_*` debug stack that retail
-also lacks.
+(0xAB606F3F) or `ScePamgrForDriver` (0xA41B0AAF)**.
+
+It was not always so. `os0/kd/pamgr.skprx` shipped on retail firmware up to
+and including 3.36 and disappeared in 3.50, which is also where `dbgsdio` and
+`sdbgsdio` went: exactly three modules, all debug facilities, dropped in one
+release. Checked across the decrypted archive from 3.01 through 3.73 — every
+version up to 3.36 carries 49 kernel modules including `pamgr`, every version
+from 3.50 carries 46 without it.
 
 Two consequences:
 
-- **The phase-3 spike is dead before it starts.** Anexo B's `pamgr-smoke`,
-  `pamgr-arm` and `pamgr-counter` experiments cannot run on a CEX, because
-  the library has no implementation there to call. A non-intrusive sampler
-  has to come from a kernel hook, not from ScePamgr.
+- **The phase-3 spike cannot run as written, but the path is not closed.**
+  Anexo B's `pamgr-smoke`, `pamgr-arm` and `pamgr-counter` experiments have
+  nothing to call on a 3.60/3.65 console. Carrying the 3.36 module forward
+  under taiHEN is a real option rather than a wild one: of the 55 kernel
+  functions `pamgr` from 3.36 imports, **51 still resolve against retail
+  3.60's own exports**. The four that do not are three `SceSysrootForKernel`
+  NIDs (0x4CD47EEE, 0xA47EB096, 0xC10A193B) and one from
+  `SceSyslibtraceForKernel` (0x7CC73CDA), whose provider is itself gone from
+  retail. Import resolution is only the first hurdle — a module from an older
+  branch can still depend on kernel structure layouts that moved — but the
+  gap is small enough to be worth measuring before falling back to writing a
+  scheduler hook.
 - **`scePerfGetTimebaseFrequency` returns garbage on retail.** The import is
   unresolvable, and the compiled-in stub is `mvn r0, #0; bx lr`, so the call
   yields 0xFFFFFFFF. Dividing timestamps by that collapses the whole
@@ -77,8 +89,9 @@ agree), with no ScePamgr involvement. `sceKernelPaGetTimebaseValue` reads the
 same offset in the same structure, so the design's question of whether ScePerf
 and ScePamgr share a clock domain is answered — they read the same counter.
 
-The rate that counter advances at is still unknown. Prototype `pamgr.elf`
-returns `movw r0, #0x14d`, decimal 333, with no unit stated anywhere; 333 Hz
+The rate that counter advances at is still unknown. Both prototype 1.691.011
+and retail 3.36 `pamgr` return `movw r0, #0x14d`, decimal 333 — so the value
+is genuine and not a prototype artefact — with no unit stated anywhere; 333 Hz
 would be far too coarse for the counter it describes, and 333 MHz matches the
 Vita's nominal CPU clock, but that is a hypothesis. Runtime calibration
 sidesteps it, and a bring-up run on hardware will report the measured value.

@@ -13,7 +13,7 @@ Vita3K (see below); the kernel backend cannot be, for the reasons in
 | 0 — Bring-up | Verified under emulation | Handshake, zones, nesting and frames confirmed against a real Tracy capture from Vita3K. |
 | 1 — Kernel bridge | Built | ABI v1, per-core SPSC rings, `ksceKernelProcUserMap`, process-event cleanup, module snapshots. |
 | 2 — Provisional samples | Built | Suspend/read/resume sampler, injected into Tracy as callstack samples. Offline symbolication in `tools/symbol_map.py`. |
-| 3 — Non-intrusive sampling | Blocked | ScePamgr does not exist on retail firmware, so the design's primary hypothesis is out; a kernel hook is the remaining option. |
+| 3 — Non-intrusive sampling | Not started | ScePamgr was dropped from retail firmware in 3.50. Carrying the 3.36 module forward under taiHEN is worth measuring (51 of its 55 kernel imports still resolve on 3.60) before falling back to a scheduler hook. |
 | 4 — PMU | Partial | ScePerf counters and plots are implemented client-side. The privileged kernel path is not. |
 | 5 — Callstacks | Phase A only | Samples carry a single PC. LR, stack snapshots and offline unwinding are not implemented. |
 | 6 — GPU / Razor | Not started | — |
@@ -67,8 +67,9 @@ kernel therefore writes an acknowledgement into the shared header during
   and how large the clock-sync error actually is.
 - How many PMU counters the firmware leaves programmable, and whether they
   survive context switches.
-- A non-intrusive sampling source. ScePamgr is ruled out (see
-  `docs/reverse_engineering.md`), which leaves a kernel hook.
+- A non-intrusive sampling source. ScePamgr is absent from 3.60/3.65, so the
+  choice is between porting the 3.36 module forward and writing a scheduler
+  hook; see `docs/reverse_engineering.md`.
 
 ## What the emulator run showed
 
