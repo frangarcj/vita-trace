@@ -97,6 +97,44 @@ would be far too coarse for the counter it describes, and 333 MHz matches the
 Vita's nominal CPU clock, but that is a hypothesis. Runtime calibration
 sidesteps it, and a bring-up run on hardware will report the measured value.
 
+## The PMU survives on retail, through CP15 rather than ScePamgr
+
+Losing ScePamgr does not take the ARM performance counters with it, which
+was the first worry once the module turned out to be gone. Disassembling
+retail 3.60's `libperf` shows every `scePerfArmPmon*` entry point doing its
+work in userland:
+
+| Call | CP15 register |
+|---|---|
+| `scePerfArmPmonReset` | PMCR, `c9,c12,0` (read-modify-write) |
+| `scePerfArmPmonStart` | PMCNTENSET, `c9,c12,1`, written `0x8000003F` |
+| `scePerfArmPmonStop` | PMCNTENCLR, `c9,c12,2` |
+| `scePerfArmPmonGetCounterValue` | PMSELR `c9,c12,5`, then PMXEVCNTR `c9,c13,2` or PMCCNTR `c9,c13,0` |
+| `scePerfArmPmonSoftwareIncrement` | PMSWINC, `c9,c12,4` |
+
+The catch is the thread argument. `scePerfArmPmonStart` branches on it:
+
+```
+    blx  <sceKernelGetPMUSERENR>
+    cbz  r0, <error 0x80580005>      ; userland PMU access disabled
+    cbz  r4, <direct CP15 path>      ; thid == 0
+    mov  r0, r4
+    blx  <ScePamgr sceKernelPerfArmPmonStart>   ; thid != 0
+```
+
+Naming another thread goes through ScePamgr and therefore cannot work on
+3.60 or later. Passing `SCE_PERF_ARM_PMON_THREAD_ID_SELF`, which is 0, takes
+the CP15 path and returns 0. The client only ever passes 0.
+
+Both paths are gated on `sceKernelGetPMUSERENR` returning non-zero — the
+ARM register controlling userland access to the monitors. The client now
+checks it before programming anything, so a console with userland PMU access
+disabled reports that instead of counters that quietly refuse. VitaSDK ships
+the stub for it but declares it in no header.
+
+The write of `0x8000003F` to PMCNTENSET also answers, tentatively, how many
+counters exist: the cycle counter plus six programmable ones.
+
 ## Open items from the design (validate on CEX or resolve via RE)
 
 - PC sampling without suspending the target thread. ScePamgr is absent from

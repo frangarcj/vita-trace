@@ -7,6 +7,13 @@
 
 #include "vita_tracy/pmu.h"
 
+/* Reads PMUSERENR, the register that decides whether userland may touch the
+ * performance monitors at all. ScePerf gates every PMU entry point on it and
+ * fails early when it reads zero, so checking it first turns "the counters
+ * silently refuse" into something diagnosable. VitaSDK ships the stub but
+ * declares it in no header. */
+extern "C" int sceKernelGetPMUSERENR(void);
+
 namespace {
 
 struct CounterState {
@@ -50,6 +57,13 @@ uint32_t vita_tracy_pmu_begin(const uint8_t *event_codes, uint32_t count) {
         count = VITA_TRACY_PMU_MAX_PROBE;
     }
 
+    if (sceKernelGetPMUSERENR() == 0) {
+        return 0;
+    }
+
+    /* Always the calling thread. ScePerf services that case by writing the
+     * CP15 monitor registers directly, whereas naming another thread routes
+     * through ScePamgr, which retail firmware dropped in 3.50. */
     SceUID self = SCE_PERF_ARM_PMON_THREAD_ID_SELF;
     if (scePerfArmPmonReset(self) < 0) {
         return 0;
