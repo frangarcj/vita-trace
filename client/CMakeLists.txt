@@ -3,9 +3,11 @@ add_library(tracy_vita STATIC
     ${CMAKE_SOURCE_DIR}/common/shared_layout.c
     ${CMAKE_SOURCE_DIR}/common/shared_ring.c
     clock_sync.c
+    pmu_delta.c
     timebase_convert.c
     tracy_vita_alloc.cpp
     tracy_vita_platform.cpp
+    tracy_vita_pmu.cpp
     tracy_vita_init.cpp
     tracy_vita_kernel_bridge.cpp
     tracy_vita_time.cpp
