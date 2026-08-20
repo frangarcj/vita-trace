@@ -4,7 +4,9 @@
 #include "internal.h"
 #include "vita_tracy/kernel_abi.h"
 
-void _start() __attribute__((weak, alias("module_start")));
+int module_start(SceSize args, void *argp);
+
+int _start(SceSize args, void *argp) __attribute__((weak, alias("module_start")));
 
 int module_start(SceSize args, void *argp) {
     (void)args;
