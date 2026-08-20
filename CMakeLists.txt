@@ -33,6 +33,7 @@ else()
 
     add_subdirectory(kernel)
     add_subdirectory(client)
+    add_subdirectory(samples/bringup)
     add_subdirectory(samples/zones)
     add_subdirectory(samples/sampling_synthetic)
     add_subdirectory(samples/pmu_cache)
