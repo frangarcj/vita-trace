@@ -120,6 +120,30 @@ uint32_t RoundUpTo4K(uint32_t value) {
     return (value + 0xFFFu) & ~0xFFFu;
 }
 
+/* Whether the control ABI was actually linked to a loaded plugin.
+ *
+ * The kernel backend is optional, so its imports are weak and the module
+ * loads with them unresolved. An unresolved stub is left exactly as the
+ * toolchain emitted it — sixteen bytes of [version|flags, library NID,
+ * function NID, padding] — which is data, not code. The loader overwrites it
+ * with a branch only when the import resolves, so calling it while the
+ * plugin is absent executes the NIDs as instructions and takes the process
+ * down. Reading the header first is the difference between "no plugin" and a
+ * crash dump. */
+bool KernelPluginPresent() {
+    uintptr_t addr = (uintptr_t)(void *)&vitaTracyRegister;
+    addr &= ~(uintptr_t)1; /* these stubs are ARM, but never assume */
+
+    const volatile uint32_t *stub = (const volatile uint32_t *)addr;
+    uint32_t header = stub[0];
+
+    uint32_t version = header >> 16;
+    uint32_t flags = header & 0xFFFFu;
+    const uint32_t kWeakImportFlag = 0x0008u;
+
+    return !(version == 1u && (flags & kWeakImportFlag) != 0u);
+}
+
 } // namespace
 
 extern "C" {
@@ -127,6 +151,9 @@ extern "C" {
 int vita_tracy_kernel_attach(uint32_t samples_per_core, uint32_t control_capacity) {
     if (g_bridge.shared != nullptr) {
         return VITA_TRACY_ERROR_STATE;
+    }
+    if (!KernelPluginPresent()) {
+        return VITA_TRACY_ERROR_UNSUPPORTED;
     }
     if (samples_per_core == 0) {
         samples_per_core = kDefaultSamplesPerCore;
