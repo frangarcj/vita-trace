@@ -2,7 +2,6 @@
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/perf.h>
 
-#include "import_check.h"
 #include "vita_tracy/timebase.h"
 
 /* The clock starts on the process timer and only moves to ScePerf once that
@@ -65,13 +64,16 @@ uint64_t vita_tracy_timebase_value(void) {
     return g_use_perf ? scePerfGetTimebaseValue() : sceKernelGetProcessTimeWide();
 }
 
-/* Called once ScePerf has been loaded. Adopts it only if both of its entry
- * points really got bound. */
-int vita_tracy_timebase_adopt_perf(void) {
-    if (!vita_tracy_import_resolved((const void *)&scePerfGetTimebaseValue)) {
-        return 0;
-    }
-    if (!vita_tracy_import_resolved((const void *)&scePerfGetTimebaseFrequency)) {
+/* Adopts ScePerf once its module is known to be resident.
+ *
+ * Availability has to come from sceSysmodule, not from inspecting the import
+ * stub. A stub the loader could not bind is not left as data: hardware shows
+ * it patched to branch to address 0, which is indistinguishable from a real
+ * veneer without knowing the exact encoding. If the module never loaded,
+ * though, nothing could have bound it, and that is a documented answer. */
+int vita_tracy_timebase_adopt_perf(int perf_module_resident) {
+    if (!perf_module_resident) {
+        g_use_perf = false;
         return 0;
     }
 

@@ -63,7 +63,10 @@ set(VITA_TRACY_KERNEL_STUB
 
 target_link_libraries(tracy_vita PUBLIC
     ${VITA_TRACY_KERNEL_STUB}
-    ScePerf_stub
+    # Weak, because it genuinely is optional: the clock falls back to the
+    # process timer when ScePerf cannot be loaded, and a non-weak import for
+    # a module that may never arrive is a load-time hazard for no benefit.
+    ScePerf_stub_weak
     SceNet_stub
     SceNetCtl_stub
     SceSysmodule_stub

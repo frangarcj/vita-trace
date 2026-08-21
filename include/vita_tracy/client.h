@@ -34,14 +34,17 @@ uint32_t vita_tracy_timebase_frequency(void);
  * the microsecond process timer instead, which is always available but far
  * coarser. */
 int vita_tracy_timebase_use_perf(void);
-int vita_tracy_timebase_adopt_perf(void);
+int vita_tracy_timebase_adopt_perf(int perf_module_resident);
 
 /* Connects to tracy_kernel.skprx: allocates the shared block, registers it,
  * calibrates the two clocks and starts draining the rings into Tracy.
  *
- * The kernel backend is optional. When the plugin is not loaded this fails
- * and the application keeps producing zones, frames and plots normally; it
- * only loses sampling, module metadata and kernel-side events.
+ * The caller must already know tracy_kernel.skprx is loaded. The control
+ * ABI is imported weakly so an application without the plugin still starts,
+ * but an import the loader could not bind is patched to branch to address
+ * zero, and reading the stub cannot distinguish that from a real one. There
+ * is therefore no safe probe: calling this without the plugin present ends
+ * the process.
  *
  * `samples_per_core` and `control_capacity` are slot counts and must be
  * powers of two. Passing 0 uses the defaults.

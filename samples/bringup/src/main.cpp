@@ -145,6 +145,19 @@ void CheckPmu() {
 void CheckKernelPlugin() {
     Report("-- kernel plugin --");
 
+    /* Calling the control ABI while tracy_kernel.skprx is not loaded takes
+     * the process down: the weak import is patched to branch to address 0,
+     * and there is no way to tell that apart from a bound stub by reading
+     * it. So attaching is opt-in, and the marker file is the opt-in. */
+    SceUID marker = sceIoOpen("ux0:data/vita_tracy_kernel.on", SCE_O_RDONLY, 0);
+    if (marker < 0) {
+        Report("skipped: create ux0:data/vita_tracy_kernel.on to try it,");
+        Report("  but only once the plugin is really loaded");
+        Report("");
+        return;
+    }
+    sceIoClose(marker);
+
     int ret = vita_tracy_kernel_attach(0, 0);
     Report("vita_tracy_kernel_attach: %d", ret);
     if (ret != 0) {

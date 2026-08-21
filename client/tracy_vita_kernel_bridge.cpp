@@ -6,8 +6,6 @@
 #include <tracy/Tracy.hpp>
 #include <client/TracyProfiler.hpp>
 
-#include "import_check.h"
-
 #include "vita_tracy/client.h"
 #include "vita_tracy/clock_sync.h"
 #include "vita_tracy/kernel_abi.h"
@@ -122,9 +120,6 @@ uint32_t RoundUpTo4K(uint32_t value) {
     return (value + 0xFFFu) & ~0xFFFu;
 }
 
-bool KernelPluginPresent() {
-    return vita_tracy_import_resolved((const void *)&vitaTracyRegister) != 0;
-}
 
 } // namespace
 
@@ -133,9 +128,6 @@ extern "C" {
 int vita_tracy_kernel_attach(uint32_t samples_per_core, uint32_t control_capacity) {
     if (g_bridge.shared != nullptr) {
         return VITA_TRACY_ERROR_STATE;
-    }
-    if (!KernelPluginPresent()) {
-        return VITA_TRACY_ERROR_UNSUPPORTED;
     }
     if (samples_per_core == 0) {
         samples_per_core = kDefaultSamplesPerCore;

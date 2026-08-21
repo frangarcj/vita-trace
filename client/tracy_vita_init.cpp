@@ -18,16 +18,16 @@ int vita_tracy_init(void) {
      * correlates against, but the profiler has to come up either way:
      * letting an optional module decide whether Tracy starts leaves every
      * later Tracy call asserting on a profiler that was never built. */
-    if (sceSysmoduleIsLoaded(SCE_SYSMODULE_PERF) != SCE_SYSMODULE_LOADED) {
+    int resident = (sceSysmoduleIsLoaded(SCE_SYSMODULE_PERF) == SCE_SYSMODULE_LOADED);
+    if (!resident) {
         g_perf_module_status = sceSysmoduleLoadModule(SCE_SYSMODULE_PERF);
         if (g_perf_module_status >= 0) {
             g_loaded_perf_module = true;
+            resident = 1;
         }
     }
 
-    /* Adopts ScePerf only if it is both loaded and actually bound; falls
-     * back to the process timer otherwise. */
-    vita_tracy_timebase_adopt_perf();
+    vita_tracy_timebase_adopt_perf(resident);
 
 #if defined(TRACY_DELAYED_INIT) && defined(TRACY_MANUAL_LIFETIME)
     if (!g_profiler_started) {

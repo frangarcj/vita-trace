@@ -5,8 +5,7 @@
 
 #include <tracy/Tracy.hpp>
 
-#include "import_check.h"
-
+#include "vita_tracy/client.h"
 #include "vita_tracy/pmu.h"
 
 /* Reads PMUSERENR, the register that decides whether userland may touch the
@@ -59,9 +58,9 @@ uint32_t vita_tracy_pmu_begin(const uint8_t *event_codes, uint32_t count) {
         count = VITA_TRACY_PMU_MAX_PROBE;
     }
 
-    /* Every scePerfArmPmon* entry point is a ScePerf import, so it is only
-     * safe to call once that module is loaded and bound. */
-    if (!vita_tracy_import_resolved((const void *)&scePerfArmPmonReset)) {
+    /* Every scePerfArmPmon* entry point is a ScePerf import, so none of them
+     * may be called unless that module is resident. */
+    if (!vita_tracy_timebase_use_perf()) {
         return 0;
     }
     if (sceKernelGetPMUSERENR() == 0) {
