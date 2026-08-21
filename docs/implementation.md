@@ -10,7 +10,7 @@ Vita3K (see below); the kernel backend cannot be, for the reasons in
 
 | Phase | State | Notes |
 |---|---|---|
-| 0 — Bring-up | Verified under emulation | Handshake, zones, nesting and frames confirmed against a real Tracy capture from Vita3K. |
+| 0 — Bring-up | **Verified on hardware** | A retail console captured over Wi-Fi: 556 frames, 554 zones in 12 s, timings self-consistent. |
 | 1 — Kernel bridge | Built | ABI v1, per-core SPSC rings, `ksceKernelProcUserMap`, process-event cleanup, module snapshots. |
 | 2 — Provisional samples | Built | Suspend/read/resume sampler, injected into Tracy as callstack samples. Offline symbolication in `tools/symbol_map.py`. |
 | 3 — Non-intrusive sampling | Not started | ScePamgr's ARM trace turned out to be CoreSight PTM, but the SoC exposes no ETB/ETR, so the trace has nowhere to land in RAM. Unless a sink is found, the options are a scheduler hook or the per-core memory-mapped PMU frames. |
@@ -56,8 +56,8 @@ kernel therefore writes an acknowledgement into the shared header during
 
 ## What still needs hardware
 
-- Whether the handshake works over Wi-Fi rather than a host loopback, and
-  holds a session for the 30+ minutes the design asks for.
+- Whether a session holds for the 30+ minutes the design asks for. Twelve
+  seconds over Wi-Fi is proven; a long capture is not.
 - The two suspend/resume status values in
   `kernel/sampler_debug_fallback.c`, which come from documentation notes
   rather than measurement.
@@ -70,6 +70,27 @@ kernel therefore writes an acknowledgement into the shared header during
 - A non-intrusive sampling source. ScePamgr is absent from 3.60/3.65, so the
   choice is between porting the 3.36 module forward and writing a scheduler
   hook; see `docs/reverse_engineering.md`.
+
+## What the hardware run showed
+
+`samples/bringup` on a retail 3.65 console, captured from a PC over Wi-Fi
+with `tracy-capture` built from the pinned commit:
+
+```
+Timer resolution: 1 us
+Frames: 556   Zones: 554   Time span: 12.03 s
+
+Work  main.cpp:193  553 calls  mean 5.560 ms  min 5.421 ms  max 5.884 ms
+```
+
+The numbers agree with each other: 553 zones at 5.56 ms is 3.08 s of 12.03 s,
+matching the 10.14% the exporter reports, and 5.56 ms of work plus a 16 ms
+delay gives 21.6 ms a frame, matching 556 frames in 12.03 s. Every duration
+is a whole number of microseconds, which is the clock showing through.
+
+That closes phase 0 on hardware: the pinned viewer connects over Wi-Fi, the
+SceNet path carries the protocol, and zones and frames arrive correctly
+timed.
 
 ## What the emulator run showed
 
