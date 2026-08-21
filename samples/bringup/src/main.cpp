@@ -62,6 +62,17 @@ void WriteReport() {
 
 void CheckTimebase() {
     Report("-- timebase --");
+    Report("SCE_SYSMODULE_PERF load: 0x%08X %s", (unsigned)vita_tracy_perf_module_status(),
+           vita_tracy_perf_module_status() < 0 ? "(FAILED)" : "(ok)");
+    Report("clock source: %s",
+           vita_tracy_timebase_use_perf() ? "ScePerf timebase" : "process timer (us)");
+
+
+    if (!vita_tracy_timebase_use_perf()) {
+        Report("ScePerf is not callable here, so nothing below it can run");
+        Report("");
+        return;
+    }
 
     /* Predicted to be 0xFFFFFFFF: the call tail-jumps into a ScePamgr import
      * that retail firmware has provided nothing for since 3.50. */

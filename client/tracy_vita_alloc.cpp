@@ -22,4 +22,8 @@ void PlatformAllocatorInit(void) {}
 
 void PlatformAllocatorThreadInit(void) {}
 
+void PlatformAllocatorThreadFinalize(void) {}
+
+void PlatformAllocatorFinalize(void) {}
+
 } // extern "C"

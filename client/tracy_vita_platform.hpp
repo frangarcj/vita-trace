@@ -40,6 +40,8 @@ void *PlatformRealloc(void *ptr, size_t size);
 void PlatformFree(void *ptr);
 void PlatformAllocatorInit(void);
 void PlatformAllocatorThreadInit(void);
+void PlatformAllocatorThreadFinalize(void);
+void PlatformAllocatorFinalize(void);
 
 const char *PlatformGetUserLogin(void);
 const char *PlatformGetUserFullName(void);

@@ -30,6 +30,18 @@ if(VITA_TRACY_ON_DEMAND)
     target_compile_definitions(tracy_vita PUBLIC TRACY_ON_DEMAND)
 endif()
 
+# Tracy would otherwise build its profiler from a static constructor, and its
+# very first act is to read the clock. The clock is ScePerf, which is not
+# loaded into a process until sceSysmoduleLoadModule runs, so that read lands
+# on an unresolved import and branches to zero before main() is ever reached.
+# Delaying construction lets vita_tracy_init load the module first.
+if(NOT VITA_TRACY_NO_DELAYED_INIT)
+  target_compile_definitions(tracy_vita PUBLIC
+    TRACY_DELAYED_INIT
+    TRACY_MANUAL_LIFETIME
+  )
+endif()
+
 # Tracy's discovery broadcast, system tracing, native sampling and source
 # transfer all assume APIs the Vita does not have; sampling and context
 # switches arrive from the kernel backend instead, and symbols are resolved
