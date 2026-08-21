@@ -204,6 +204,36 @@ the stub for it but declares it in no header.
 The write of `0x8000003F` to PMCNTENSET also answers, tentatively, how many
 counters exist: the cycle counter plus six programmable ones.
 
+## Measured on hardware (3.65, 2026-08-21)
+
+The bring-up sample ran to completion on a retail console and settled three
+questions the firmware reading could only frame.
+
+| Question | Answer |
+|---|---|
+| Can an application load ScePerf? | **No.** `sceSysmoduleLoadModule(SCE_SYSMODULE_PERF)` returns `0x805A1000`, `SCE_SYSMODULE_ERROR_INVALID_VALUE` — the id is rejected outright, not merely unavailable. |
+| Which clock does the client end up on? | The process timer, at microsecond resolution. |
+| Is the PMU reachable from userland? | **No.** `sceKernelGetPMUSERENR()` reads 0, so every CP15 monitor access is barred. |
+
+The whole performance stack is gone from retail together: ScePamgr removed in
+3.50, SceDTrace and syslibtrace absent, and ScePerf itself unloadable. It was
+devkit equipment.
+
+Three consequences for the design:
+
+- **The clock the design specified does not exist here.** Section 6 treats
+  `scePerfGetTimebaseValue` as confirmed; on a retail console it cannot be
+  called at all. The client runs on `sceKernelGetProcessTimeWide` instead,
+  which is a microsecond counter — 333 CPU cycles per tick. Frame and
+  function-level work is measurable; anything shorter collapses.
+- **Phase 4 cannot work as written.** The client-side PMU is barred by
+  PMUSERENR, and ScePerf, which is how the design reaches the counters, is
+  not loadable anyway.
+- **The kernel backend stops being optional.** It was scoped as a bonus for
+  sampling and metadata. It is now the only route to either a
+  high-resolution clock or the PMU, because a kernel module can write
+  PMUSERENR and can reach the per-core `ScePmu*Reg` frames directly.
+
 ## Open items from the design (validate on CEX or resolve via RE)
 
 - PC sampling without suspending the target thread. ScePamgr is absent from

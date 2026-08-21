@@ -14,7 +14,7 @@ Vita3K (see below); the kernel backend cannot be, for the reasons in
 | 1 — Kernel bridge | Built | ABI v1, per-core SPSC rings, `ksceKernelProcUserMap`, process-event cleanup, module snapshots. |
 | 2 — Provisional samples | Built | Suspend/read/resume sampler, injected into Tracy as callstack samples. Offline symbolication in `tools/symbol_map.py`. |
 | 3 — Non-intrusive sampling | Not started | ScePamgr's ARM trace turned out to be CoreSight PTM, but the SoC exposes no ETB/ETR, so the trace has nowhere to land in RAM. Unless a sink is found, the options are a scheduler hook or the per-core memory-mapped PMU frames. |
-| 4 — PMU | Partial | ScePerf counters and plots are implemented client-side. The privileged kernel path is not. |
+| 4 — PMU | Blocked from userland | Hardware reports PMUSERENR as 0 and refuses to load ScePerf, so the client-side path cannot work. Only the kernel can open the counters. |
 | 5 — Callstacks | Phase A only | Samples carry a single PC. LR, stack snapshots and offline unwinding are not implemented. |
 | 6 — GPU / Razor | Not started | — |
 | 7 — Uninstrumented agent | Not started | `agent/` is empty. |
@@ -61,12 +61,12 @@ kernel therefore writes an acknowledgement into the shared header during
 - The two suspend/resume status values in
   `kernel/sampler_debug_fallback.c`, which come from documentation notes
   rather than measurement.
-- The rate the ScePerf timebase counter advances at. The client measures it
-  at startup, and a bring-up run should report what it measured.
 - Whether ScePerf and the kernel timebase drift apart over a long session,
   and how large the clock-sync error actually is.
-- How many PMU counters the firmware leaves programmable, and whether they
-  survive context switches.
+- How many PMU counters are programmable once a kernel module opens
+  PMUSERENR, and whether they survive context switches.
+- What high-resolution clock is reachable without ScePerf. The process timer
+  works but is microseconds; the kernel plugin is the likely answer.
 - A non-intrusive sampling source. ScePamgr is absent from 3.60/3.65, so the
   choice is between porting the 3.36 module forward and writing a scheduler
   hook; see `docs/reverse_engineering.md`.
