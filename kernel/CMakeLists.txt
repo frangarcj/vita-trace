@@ -12,6 +12,7 @@ add_executable(tracy_kernel
     ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
     ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c
     ${VITA_TRACY_SOURCE_DIR}/common/pmu_core.c
+    ${VITA_TRACY_SOURCE_DIR}/common/pmu_overflow.c
     ${VITA_TRACY_SOURCE_DIR}/common/control_gate.c
     state.c
 )

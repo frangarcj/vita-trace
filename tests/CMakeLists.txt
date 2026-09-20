@@ -13,6 +13,7 @@ add_executable(vita_tracy_tests
     main.cpp
     pmu_test.cpp
     pmu_core_test.cpp
+    pmu_overflow_test.cpp
     control_gate_test.cpp
     clock_sync_test.cpp
     shared_ring_test.cpp
@@ -22,6 +23,7 @@ add_executable(vita_tracy_tests
     thread_registry_test.cpp
     ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c
     ${VITA_TRACY_SOURCE_DIR}/common/pmu_core.c
+    ${VITA_TRACY_SOURCE_DIR}/common/pmu_overflow.c
     ${VITA_TRACY_SOURCE_DIR}/common/control_gate.c
     ${CMAKE_SOURCE_DIR}/common/shared_layout.c
     ${CMAKE_SOURCE_DIR}/common/shared_ring.c

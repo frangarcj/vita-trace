@@ -16,7 +16,7 @@ extern "C" {
 /* Logical register operations keep the ownership/delta algorithm host-testable.
  * The caller serializes access on the owning CPU and masks local interrupts. */
 typedef enum VitaPmuRegister {
-    VITA_PMU_PMCR, VITA_PMU_CNTEN, VITA_PMU_CNTCLR, VITA_PMU_INTEN,
+    VITA_PMU_PMCR, VITA_PMU_CNTEN, VITA_PMU_CNTCLR, VITA_PMU_INTEN, VITA_PMU_INTCLR,
     VITA_PMU_OVSR, VITA_PMU_SELR, VITA_PMU_CYCLES, VITA_PMU_TYPE, VITA_PMU_VALUE
 } VitaPmuRegister;
 typedef struct VitaPmuIo {

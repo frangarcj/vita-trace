@@ -25,6 +25,8 @@ static void write_register(void *context, VitaPmuRegister reg, uint32_t value) {
     case VITA_PMU_PMCR: __asm__ volatile("mcr p15, 0, %0, c9, c12, 0" :: "r"(value) : "memory"); break;
     case VITA_PMU_CNTEN: __asm__ volatile("mcr p15, 0, %0, c9, c12, 1" :: "r"(value) : "memory"); break;
     case VITA_PMU_CNTCLR: __asm__ volatile("mcr p15, 0, %0, c9, c12, 2" :: "r"(value) : "memory"); break;
+    case VITA_PMU_INTEN: __asm__ volatile("mcr p15, 0, %0, c9, c14, 1" :: "r"(value) : "memory"); break;
+    case VITA_PMU_INTCLR: __asm__ volatile("mcr p15, 0, %0, c9, c14, 2" :: "r"(value) : "memory"); break;
     case VITA_PMU_OVSR: __asm__ volatile("mcr p15, 0, %0, c9, c12, 3" :: "r"(value) : "memory"); break;
     case VITA_PMU_SELR: __asm__ volatile("mcr p15, 0, %0, c9, c12, 5" :: "r"(value) : "memory"); break;
     case VITA_PMU_CYCLES: __asm__ volatile("mcr p15, 0, %0, c9, c13, 0" :: "r"(value) : "memory"); break;
