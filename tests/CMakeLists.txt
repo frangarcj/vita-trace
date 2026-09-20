@@ -21,6 +21,7 @@ add_executable(vita_tracy_tests
     state_test.cpp
     timebase_test.cpp
     thread_registry_test.cpp
+    client_lock_test.cpp
     ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c
     ${VITA_TRACY_SOURCE_DIR}/common/pmu_core.c
     ${VITA_TRACY_SOURCE_DIR}/common/pmu_overflow.c
@@ -35,6 +36,7 @@ add_executable(vita_tracy_tests
 
 target_include_directories(vita_tracy_tests PRIVATE
     ${CMAKE_SOURCE_DIR}/include
+    ${VITA_TRACY_SOURCE_DIR}/client
 )
 
 target_link_libraries(vita_tracy_tests PRIVATE doctest::doctest)

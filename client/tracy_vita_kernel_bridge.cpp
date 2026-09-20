@@ -2,8 +2,9 @@
 #include <psp2/kernel/threadmgr.h>
 
 #include <string.h>
+#include <stdio.h>
 #include <atomic>
-#include <mutex>
+#include "tracy_vita_lock.hpp"
 #include "tracy_vita_platform.hpp"
 
 #include <tracy/Tracy.hpp>
@@ -45,7 +46,7 @@ struct Bridge {
 };
 
 Bridge g_bridge;
-std::mutex g_api_mutex;
+pthread_mutex_t g_api_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Names are part of Tracy's pointer-based protocol and must stay immutable
 // until profiler shutdown, including across PMU reconfiguration/reconnection.
 char g_pmu_names[VITA_TRACE_CORE_COUNT][256][64]{};
@@ -382,7 +383,7 @@ int RollbackAttach(int error) {
 extern "C" {
 
 int vita_tracy_kernel_attach(uint32_t samples_per_core, uint32_t control_capacity) {
-    std::lock_guard<std::mutex> lock(g_api_mutex);
+    VitaTracyLockGuard lock(&g_api_mutex);
     if (g_bridge.shared != nullptr) {
         return VITA_TRACY_ERROR_STATE;
     }
@@ -500,7 +501,7 @@ int vita_tracy_kernel_set_sampling(uint32_t frequency_hz) {
 
 int vita_tracy_kernel_configure_pmu(const VitaTracyPmuConfig *config) {
     if (!config) return VITA_TRACY_ERROR_ARGS;
-    std::lock_guard<std::mutex> lock(g_api_mutex);
+    VitaTracyLockGuard lock(&g_api_mutex);
     int ret = ReadyForCommand();
     if (ret < 0) return ret;
     if (!g_bridge.shared) return VITA_TRACY_ERROR_STATE;
@@ -509,7 +510,7 @@ int vita_tracy_kernel_configure_pmu(const VitaTracyPmuConfig *config) {
 }
 
 int vita_tracy_kernel_set_sampling_ex(uint32_t frequency_hz, uint32_t flags) {
-    std::lock_guard<std::mutex> lock(g_api_mutex);
+    VitaTracyLockGuard lock(&g_api_mutex);
     int ret = ReadyForCommand();
     if (ret < 0) return ret;
     if (g_bridge.shared == nullptr) {
@@ -527,7 +528,7 @@ void vita_tracy_kernel_detach(void) {
 
 int vita_tracy_kernel_get_stats(VitaTracyStats *stats) {
     if (!stats) return VITA_TRACY_ERROR_ARGS;
-    std::lock_guard<std::mutex> lock(g_api_mutex);
+    VitaTracyLockGuard lock(&g_api_mutex);
     int ret = ReadyForCommand();
     if (ret < 0) return ret;
     g_bridge.requested_stats = *stats;
@@ -537,17 +538,17 @@ int vita_tracy_kernel_get_stats(VitaTracyStats *stats) {
 }
 
 int vita_tracy_kernel_pmu_sample_start(void) {
-    std::lock_guard<std::mutex> lock(g_api_mutex);
+    VitaTracyLockGuard lock(&g_api_mutex);
     return Submit(PmuStart);
 }
 
 int vita_tracy_kernel_pmu_sample_stop(void) {
-    std::lock_guard<std::mutex> lock(g_api_mutex);
+    VitaTracyLockGuard lock(&g_api_mutex);
     return Submit(PmuStop);
 }
 
 int vita_tracy_kernel_detach_checked(void) {
-    std::lock_guard<std::mutex> lock(g_api_mutex);
+    VitaTracyLockGuard lock(&g_api_mutex);
     if (g_bridge.shared == nullptr) {
         return 0;
     }

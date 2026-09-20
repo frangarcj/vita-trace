@@ -1,21 +1,21 @@
 #include <psp2/sysmodule.h>
 
 #include <client/TracyProfiler.hpp>
-#include <mutex>
 
+#include "tracy_vita_lock.hpp"
 #include "vita_tracy/client.h"
 
 namespace {
 bool g_loaded_perf_module = false;
 bool g_profiler_started = false;
 int g_perf_module_status = 0;
-std::mutex g_lifetime_mutex;
+pthread_mutex_t g_lifetime_mutex = PTHREAD_MUTEX_INITIALIZER;
 } // namespace
 
 extern "C" {
 
 int vita_tracy_init(void) {
-    std::lock_guard<std::mutex> lock(g_lifetime_mutex);
+    VitaTracyLockGuard lock(&g_lifetime_mutex);
     if (g_profiler_started) return 0; // Never change the clock of a live capture.
     g_perf_module_status = 0;
     /* ScePerf is an optimisation, not a dependency. It supplies a finer
@@ -53,7 +53,7 @@ void vita_tracy_shutdown(void) {
 }
 
 int vita_tracy_shutdown_checked(void) {
-    std::lock_guard<std::mutex> lock(g_lifetime_mutex);
+    VitaTracyLockGuard lock(&g_lifetime_mutex);
     /* Never destroy Tracy while the bridge can still enqueue events. */
     int ret = vita_tracy_kernel_detach_checked();
     if (ret < 0) return ret;
