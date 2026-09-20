@@ -168,7 +168,9 @@ static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
     if (!st) return;
     IrqCpu *cpu = &g_irq.cpus[cpu_id];
     __atomic_fetch_add(&st->stats.sample_irq_calls[cpu_id], 1u, __ATOMIC_RELAXED);
-    if (!cpu->overflow.acquired || cpu->failed) return;
+    /* The observer is installed before the per-core arm jobs finish. An
+     * unrelated IRQ on a merely prepared bank is not an ownership failure. */
+    if (!cpu->overflow.acquired || !cpu->overflow.armed || cpu->failed) return;
 
     int ret = vita_pmu_overflow_service(&cpu->overflow, vita_tracy_pmu_io());
     if (ret < 0) {
@@ -180,7 +182,8 @@ static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
     if (!ret) return;
 
     __atomic_fetch_add(&st->stats.sample_irq_overflows[cpu_id], 1u, __ATOMIC_RELAXED);
-    if (!__atomic_load_n(&g_irq.emit_enabled, __ATOMIC_ACQUIRE)) return;
+    if (!__atomic_load_n(&g_irq.emit_enabled, __ATOMIC_ACQUIRE) ||
+        vita_trace_control_pending(&st->control)) return;
     if (!context) {
         __atomic_fetch_add(&st->stats.sample_irq_context_errors[cpu_id], 1u, __ATOMIC_RELAXED);
         return;
@@ -212,6 +215,9 @@ static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
         __atomic_fetch_add(&st->stats.sample_irq_context_errors[cpu_id], 1u, __ATOMIC_RELAXED);
         return;
     }
+
+    if (!__atomic_load_n(&g_irq.emit_enabled, __ATOMIC_ACQUIRE) ||
+        vita_trace_control_pending(&st->control)) return;
 
     VitaTraceSample sample;
     memset(&sample, 0, sizeof(sample));

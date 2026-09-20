@@ -61,6 +61,9 @@ struct Fake {
     int fail_delete_core = -1;
     int fail_arm_core = -1;
     unsigned starts[4]{};
+    bool irq_before_arm = false;
+    VitaTracyKernelState *exit_in_context = nullptr;
+    int context_queries = 0;
     uint64_t now = 10000;
     void *registered_handler = nullptr;
     SceKernelThreadContextInfo thread{123, 0x500};
@@ -157,6 +160,11 @@ int ksceExcpmgrRegisterHandler(SceExcpKind kind, int priority, void *handler) {
 }
 
 int ksceKernelGetThreadContextInfo(SceKernelThreadContextInfo *info) {
+    ++fake.context_queries;
+    if (fake.exit_in_context) {
+        vita_trace_control_request(&fake.exit_in_context->control, 123);
+        fake.exit_in_context = nullptr;
+    }
     if (fake.nested_context) {
         fake.nested_context = false;
         VitaTracyIrqFrame nested{};
@@ -190,6 +198,12 @@ int ksceKernelStartThread(SceUID id, SceSize size, void *arg) {
     if (++fake.starts[job.core] == 2 && static_cast<int>(job.core) == fake.fail_arm_core)
         return -91;
     fake.core = static_cast<int>(job.core);
+    if (fake.irq_before_arm && fake.starts[job.core] == 2) {
+        VitaTracyIrqFrame frame{};
+        frame.spsr = 0x10;
+        frame.irq_lr = 0x81234004;
+        vita_tracy_irq_handler_c(&frame);
+    }
     job.started = true;
     job.entry(size, arg);
     fake.core = 0;
@@ -496,4 +510,41 @@ TEST_CASE_FIXTURE(Fixture, "IRQ invalid resume addresses and unsupported instruc
     overflow(0, context);
     CHECK(state.stats.sample_irq_context_errors[0] == 5);
     CHECK(vita_trace_ring_pending(vita_trace_shared_core_ring(memory.data(), 0)) == 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "unrelated IRQs during prepare-to-arm do not fail prepared counters") {
+    fake.irq_before_arm = true;
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    CHECK(fake.notify_events == 0);
+    CHECK(state.stats.sample_irq_last_error == 0);
+    CHECK(fake.context_queries == 0);
+    VitaTracyIrqFrame frame{};
+    frame.spsr = 0x10;
+    frame.irq_lr = 0x81234004;
+    overflow(0, frame);
+    CHECK(state.stats.samples_emitted[0] == 1);
+}
+
+TEST_CASE_FIXTURE(Fixture, "pending process cleanup services overflow without querying or emitting target context") {
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    REQUIRE(vita_trace_control_request(&state.control, 123));
+    VitaTracyIrqFrame frame{};
+    frame.spsr = 0x10;
+    frame.irq_lr = 0x81234004;
+    overflow(0, frame);
+    CHECK((fake.banks[0].overflow & VITA_PMU_CYCLE_BIT) == 0);
+    CHECK(state.stats.sample_irq_overflows[0] == 1);
+    CHECK(fake.context_queries == 0);
+    CHECK(state.stats.samples_emitted[0] == 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "a process exit requested during context lookup prevents publication") {
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    fake.exit_in_context = &state;
+    VitaTracyIrqFrame frame{};
+    frame.spsr = 0x10;
+    frame.irq_lr = 0x81234004;
+    overflow(0, frame);
+    CHECK(fake.context_queries == 1);
+    CHECK(state.stats.samples_emitted[0] == 0);
 }
