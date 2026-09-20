@@ -28,13 +28,15 @@ struct Bridge {
     void *shared = nullptr;
     uint32_t size = 0;
     SceUID drain_thread = -1;
+    bool drain_started = false;
     std::atomic<bool> draining{false};
     std::atomic<int> command{None};
     std::atomic<int> command_result{0};
     SceUID command_done = -1;
+    bool command_pending = false; // Only accessed under g_api_mutex.
     uint32_t requested_hz = 0;
     uint32_t requested_flags = 0;
-    VitaTracyStats *requested_stats = nullptr;
+    VitaTracyStats requested_stats{};
     VitaTracyPmuConfig requested_pmu{};
     VitaTracyClockSync clock{};
     uint32_t reported_drops = 0;
@@ -210,7 +212,7 @@ int DrainThread(SceSize args, void *argp) {
                     TracyAppInfo(warning, strlen(warning));
                 }
             } else if (command == Stats) {
-                result = vitaTracyGetStats(g_bridge.requested_stats);
+                result = vitaTracyGetStats(&g_bridge.requested_stats);
             } else if (command == PmuStart) {
                 result = vitaTracyPmuSampleStart();
                 if (result == 0) {
@@ -248,19 +250,40 @@ int DrainThread(SceSize args, void *argp) {
     return 0;
 }
 
+/* An unsuccessful wait is not cancellation: the worker may still own the
+ * payload. Retain it and consume its completion before allowing another call. */
+int AwaitCommand() {
+    if (!g_bridge.command_pending) return 0;
+    const int ret = sceKernelWaitSema(g_bridge.command_done, 1, nullptr);
+    if (ret >= 0) {
+        (void)g_bridge.command_result.load(std::memory_order_acquire);
+        g_bridge.command_pending = false;
+    }
+    return ret;
+}
+
+int ReadyForCommand() {
+    const int ret = AwaitCommand();
+    if (ret < 0) return ret;
+    return g_bridge.draining.load(std::memory_order_acquire) ? 0 : VITA_TRACY_ERROR_STATE;
+}
+
 /* g_api_mutex serializes callers; the semaphore is the completion fence. */
 int Submit(Command command) {
-    if (!g_bridge.draining.load(std::memory_order_acquire)) return VITA_TRACY_ERROR_STATE;
+    int ret = ReadyForCommand();
+    if (ret < 0) return ret;
+    g_bridge.command_pending = true;
     g_bridge.command.store(command, std::memory_order_release);
-    int ret = vitaTracyWakeup();
+    ret = vitaTracyWakeup();
     if (ret < 0) {
         int expected = command;
         if (g_bridge.command.compare_exchange_strong(expected, None, std::memory_order_acq_rel)) {
+            g_bridge.command_pending = false;
             return ret;
         }
         // Already consumed: wait for completion before reusing the payload.
     }
-    ret = sceKernelWaitSema(g_bridge.command_done, 1, nullptr);
+    ret = AwaitCommand();
     return ret < 0 ? ret : g_bridge.command_result.load(std::memory_order_acquire);
 }
 
@@ -268,15 +291,39 @@ uint32_t RoundUpTo4K(uint32_t value) {
     return (value + 0xFFFu) & ~0xFFFu;
 }
 
-int RollbackAttach(int error) {
-    const int ret = vitaTracyUnregister((uint32_t)sceKernelGetProcessId());
-    if (ret < 0 && ret != VITA_TRACY_ERROR_TARGET) return ret;
+/* Only after unregister has confirmed all kernel producers are stopped. */
+int ReleaseBridgeResources() {
+    int ret;
+    if (g_bridge.drain_thread >= 0) {
+        if (g_bridge.drain_started) {
+            ret = sceKernelWaitThreadEnd(g_bridge.drain_thread, nullptr, nullptr);
+            if (ret < 0) return ret;
+        }
+        ret = sceKernelDeleteThread(g_bridge.drain_thread);
+        if (ret < 0) return ret;
+        g_bridge.drain_thread = -1;
+        g_bridge.drain_started = false;
+    }
     tracy_vita_profiler_threads_bind(nullptr);
-    sceKernelFreeMemBlock(g_bridge.memblock);
+    if (g_bridge.command_done >= 0) {
+        ret = sceKernelDeleteSema(g_bridge.command_done);
+        if (ret < 0) return ret;
+        g_bridge.command_done = -1;
+    }
+    ret = sceKernelFreeMemBlock(g_bridge.memblock);
+    if (ret < 0) return ret;
     g_bridge.memblock = -1;
     g_bridge.shared = nullptr;
     g_bridge.size = 0;
-    return error;
+    g_bridge.command_pending = false;
+    return 0;
+}
+
+int RollbackAttach(int error) {
+    const int ret = vitaTracyUnregister((uint32_t)sceKernelGetProcessId());
+    if (ret < 0 && ret != VITA_TRACY_ERROR_TARGET) return ret;
+    const int cleanup = ReleaseBridgeResources();
+    return cleanup < 0 ? cleanup : error;
 }
 
 
@@ -381,14 +428,14 @@ int vita_tracy_kernel_attach(uint32_t samples_per_core, uint32_t control_capacit
         return RollbackAttach(ret);
     }
     g_bridge.command.store(None, std::memory_order_relaxed);
+    g_bridge.command_pending = false;
     g_bridge.draining.store(true, std::memory_order_release);
     SceUID thid = sceKernelCreateThread("VitaTracyDrain", DrainThread, 0x40, 0x4000, 0, 0, nullptr);
+    g_bridge.drain_thread = thid >= 0 ? thid : -1;
     ret = thid < 0 ? thid : sceKernelStartThread(thid, 0, nullptr);
+    g_bridge.drain_started = ret >= 0;
     if (ret < 0) {
         g_bridge.draining.store(false, std::memory_order_release);
-        if (thid >= 0) sceKernelDeleteThread(thid);
-        sceKernelDeleteSema(g_bridge.command_done);
-        g_bridge.command_done = -1;
         return RollbackAttach(ret);
     }
 
@@ -403,6 +450,8 @@ int vita_tracy_kernel_set_sampling(uint32_t frequency_hz) {
 int vita_tracy_kernel_configure_pmu(const VitaTracyPmuConfig *config) {
     if (!config) return VITA_TRACY_ERROR_ARGS;
     std::lock_guard<std::mutex> lock(g_api_mutex);
+    int ret = ReadyForCommand();
+    if (ret < 0) return ret;
     if (!g_bridge.shared) return VITA_TRACY_ERROR_STATE;
     g_bridge.requested_pmu = *config;
     return Submit(PmuConfigure);
@@ -410,6 +459,8 @@ int vita_tracy_kernel_configure_pmu(const VitaTracyPmuConfig *config) {
 
 int vita_tracy_kernel_set_sampling_ex(uint32_t frequency_hz, uint32_t flags) {
     std::lock_guard<std::mutex> lock(g_api_mutex);
+    int ret = ReadyForCommand();
+    if (ret < 0) return ret;
     if (g_bridge.shared == nullptr) {
         return VITA_TRACY_ERROR_STATE;
     }
@@ -426,8 +477,12 @@ void vita_tracy_kernel_detach(void) {
 int vita_tracy_kernel_get_stats(VitaTracyStats *stats) {
     if (!stats) return VITA_TRACY_ERROR_ARGS;
     std::lock_guard<std::mutex> lock(g_api_mutex);
-    g_bridge.requested_stats = stats;
-    return Submit(Stats);
+    int ret = ReadyForCommand();
+    if (ret < 0) return ret;
+    g_bridge.requested_stats = *stats;
+    ret = Submit(Stats);
+    if (ret == 0) *stats = g_bridge.requested_stats;
+    return ret;
 }
 
 int vita_tracy_kernel_pmu_sample_start(void) {
@@ -446,7 +501,8 @@ int vita_tracy_kernel_detach_checked(void) {
         return 0;
     }
 
-    int ret;
+    int ret = AwaitCommand();
+    if (ret < 0) return ret;
     if (g_bridge.draining.load(std::memory_order_acquire)) {
         ret = Submit(Detach);
         if (ret < 0) return ret;
@@ -456,20 +512,7 @@ int vita_tracy_kernel_detach_checked(void) {
         ret = vitaTracyUnregister((uint32_t)sceKernelGetProcessId());
         if (ret < 0 && ret != VITA_TRACY_ERROR_TARGET) return ret;
     }
-    if (g_bridge.drain_thread >= 0) {
-        sceKernelWaitThreadEnd(g_bridge.drain_thread, nullptr, nullptr);
-        sceKernelDeleteThread(g_bridge.drain_thread);
-        g_bridge.drain_thread = -1;
-    }
-
-    tracy_vita_profiler_threads_bind(nullptr);
-    if (g_bridge.command_done >= 0) sceKernelDeleteSema(g_bridge.command_done);
-    g_bridge.command_done = -1;
-    sceKernelFreeMemBlock(g_bridge.memblock);
-    g_bridge.memblock = -1;
-    g_bridge.shared = nullptr;
-    g_bridge.size = 0;
-    return 0;
+    return ReleaseBridgeResources();
 }
 
 } // extern "C"

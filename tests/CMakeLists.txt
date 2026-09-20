@@ -108,6 +108,22 @@ target_link_libraries(vita_tracy_autoframe_tests PRIVATE doctest::doctest)
 target_compile_features(vita_tracy_autoframe_tests PRIVATE cxx_std_17)
 doctest_discover_tests(vita_tracy_autoframe_tests)
 
+add_executable(vita_tracy_bridge_tests
+    main.cpp bridge_failure_test.cpp
+    ${VITA_TRACY_SOURCE_DIR}/client/tracy_vita_kernel_bridge.cpp
+    ${VITA_TRACY_SOURCE_DIR}/client/clock_sync.c
+    ${VITA_TRACY_SOURCE_DIR}/common/shared_layout.c
+    ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
+)
+target_include_directories(vita_tracy_bridge_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/fakes
+    ${VITA_TRACY_SOURCE_DIR}/include
+    ${VITA_TRACY_SOURCE_DIR}/client
+)
+target_link_libraries(vita_tracy_bridge_tests PRIVATE doctest::doctest)
+target_compile_features(vita_tracy_bridge_tests PRIVATE cxx_std_17)
+doctest_discover_tests(vita_tracy_bridge_tests PROPERTIES TIMEOUT 20)
+
 # The offline symbolication tool is host-side Python; its tests run in the
 # same suite so a change there fails the build like any other.
 find_package(Python3 COMPONENTS Interpreter)
