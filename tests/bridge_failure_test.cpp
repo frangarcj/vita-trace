@@ -3,10 +3,12 @@
 #include <condition_variable>
 #include <cstdlib>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <string>
 #include <vector>
+#include <client/TracyProfiler.hpp>
 #include <psp2/kernel/threadmgr.h>
 #include "vita_tracy/client.h"
 #include "vita_tracy/kernel_abi.h"
@@ -27,7 +29,10 @@ struct Runtime {
     bool fail_wait = false, fail_join = false, fail_delete = false, fail_sema = false, fail_free = false;
     bool fail_start = false, block_stats = false, stats_entered = false, stats_completed = false;
     int tokens = 0, joins = 0, deletes = 0, frees = 0, stats_calls = 0;
+    int resolve_calls = 0;
     VitaTracyStats *stats_pointer = nullptr;
+    std::map<uint32_t, int> resolutions;
+    std::vector<uint32_t> sample_threads;
 };
 std::unique_ptr<Runtime> runtime;
 struct Fixture {
@@ -53,6 +58,12 @@ void test_tracy_app_info(const char *text, std::size_t size) {
     runtime->cv.notify_all();
 }
 void test_tracy_frame_mark(const char *) {}
+void test_tracy_commit(const tracy::TestQueueItem &item) {
+    if (!item.callstackSampleFat.ptr) return;
+    std::lock_guard<std::mutex> lock(runtime->mutex);
+    runtime->sample_threads.push_back(item.callstackSampleFat.thread);
+    runtime->cv.notify_all();
+}
 
 extern "C" {
 int64_t tracy_vita_get_time(void) { return 1000000000; }
@@ -124,6 +135,12 @@ int vitaTracyUnregister(uint32_t) {
 int vitaTracyWakeup(void) {
     std::lock_guard<std::mutex> lock(runtime->mutex);
     runtime->events |= VITA_TRACY_WAKE_DATA; runtime->cv.notify_all(); return 0;
+}
+int vitaTracyResolveThread(uint32_t guid) {
+    std::lock_guard<std::mutex> lock(runtime->mutex);
+    ++runtime->resolve_calls;
+    auto it = runtime->resolutions.find(guid);
+    return it == runtime->resolutions.end() ? VITA_TRACY_ERROR_TARGET : it->second;
 }
 int vitaTracyWaitForData(uint32_t) {
     std::unique_lock<std::mutex> lock(runtime->mutex);
@@ -235,4 +252,104 @@ TEST_CASE_FIXTURE(Fixture, "bridge data-only wakes do not manufacture PMU failur
     REQUIRE(vita_tracy_kernel_detach_checked() == 0);
     CHECK(runtime->messages.empty());
     CHECK(runtime->stats_calls == 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "bridge preserves asynchronous PC sampler failure messages") {
+    runtime->start_events = VITA_TRACY_WAKE_SAMPLE_IRQ(2);
+    REQUIRE(vita_tracy_kernel_attach(8, 8) == 0);
+    std::unique_lock<std::mutex> lock(runtime->mutex);
+    REQUIRE(runtime->cv.wait_for(lock, std::chrono::seconds(5),
+        [&] { return !runtime->messages.empty(); }));
+    CHECK(runtime->messages[0].find("PC sampler c2 stopped") != std::string::npos);
+    CHECK(runtime->stats_calls == 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "bridge resolves IRQ global thread IDs outside the sample producer and caches them") {
+    REQUIRE(vita_tracy_kernel_attach(8, 8) == 0);
+    runtime->resolutions[0x700] = 0x55;
+
+    auto push = [&](uint64_t timestamp) {
+        VitaTraceSample sample{};
+        sample.timestamp = timestamp;
+        sample.pid = 123;
+        sample.tid = 0x700;
+        sample.pc = 0x81001234;
+        sample.cpu = 0;
+        sample.flags = VITA_TRACE_SAMPLE_PMU_IRQ | VITA_TRACE_SAMPLE_GLOBAL_TID;
+        REQUIRE(vita_trace_ring_try_push(vita_trace_shared_core_ring(runtime->memory, 0), &sample));
+        REQUIRE(vitaTracyWakeup() == 0);
+    };
+
+    push(10000);
+    {
+        std::unique_lock<std::mutex> lock(runtime->mutex);
+        REQUIRE(runtime->cv.wait_for(lock, std::chrono::seconds(5),
+            [&] { return runtime->sample_threads.size() == 1; }));
+        CHECK(runtime->sample_threads[0] == 0x55);
+        CHECK(runtime->resolve_calls == 1);
+    }
+
+    push(500000);
+    {
+        std::unique_lock<std::mutex> lock(runtime->mutex);
+        REQUIRE(runtime->cv.wait_for(lock, std::chrono::seconds(5),
+            [&] { return runtime->sample_threads.size() == 2; }));
+        CHECK(runtime->sample_threads[1] == 0x55);
+        CHECK(runtime->resolve_calls == 1);
+    }
+
+    runtime->resolutions[0x700] = 0x56;
+    push(1200000);
+    {
+        std::unique_lock<std::mutex> lock(runtime->mutex);
+        REQUIRE(runtime->cv.wait_for(lock, std::chrono::seconds(5),
+            [&] { return runtime->sample_threads.size() == 3; }));
+        CHECK(runtime->sample_threads[2] == 0x56);
+        CHECK(runtime->resolve_calls == 2);
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "bridge drops an unresolved IRQ thread instead of inventing attribution") {
+    REQUIRE(vita_tracy_kernel_attach(8, 8) == 0);
+    VitaTraceSample sample{};
+    sample.timestamp = 10000;
+    sample.pid = 123;
+    sample.tid = 0xBAD;
+    sample.pc = 0x81001234;
+    sample.cpu = 0;
+    sample.flags = VITA_TRACE_SAMPLE_PMU_IRQ | VITA_TRACE_SAMPLE_GLOBAL_TID;
+    REQUIRE(vita_trace_ring_try_push(vita_trace_shared_core_ring(runtime->memory, 0), &sample));
+    REQUIRE(vitaTracyWakeup() == 0);
+
+    // A control command fences behind the drain worker, proving it consumed the sample.
+    VitaTracyStats stats{};
+    stats.size = sizeof(stats);
+    stats.abi_version = VITA_TRACY_ABI_VERSION;
+    REQUIRE(vita_tracy_kernel_get_stats(&stats) == 0);
+    CHECK(runtime->resolve_calls == 1);
+    CHECK(runtime->sample_threads.empty());
+}
+
+TEST_CASE_FIXTURE(Fixture, "bridge excludes only resolved profiler workers from IRQ samples") {
+    REQUIRE(vita_tracy_kernel_attach(8, 8) == 0);
+    runtime->resolutions[0x701] = 0x66;
+    auto *header = static_cast<VitaTraceSharedHeader *>(runtime->memory);
+    REQUIRE(vita_trace_thread_add(&header->profiler_threads, 0x66));
+
+    VitaTraceSample sample{};
+    sample.timestamp = 10000;
+    sample.pid = 123;
+    sample.tid = 0x701;
+    sample.pc = 0x81001234;
+    sample.cpu = 0;
+    sample.flags = VITA_TRACE_SAMPLE_PMU_IRQ | VITA_TRACE_SAMPLE_GLOBAL_TID;
+    REQUIRE(vita_trace_ring_try_push(vita_trace_shared_core_ring(runtime->memory, 0), &sample));
+    REQUIRE(vitaTracyWakeup() == 0);
+
+    VitaTracyStats stats{};
+    stats.size = sizeof(stats);
+    stats.abi_version = VITA_TRACY_ABI_VERSION;
+    REQUIRE(vita_tracy_kernel_get_stats(&stats) == 0);
+    CHECK(runtime->resolve_calls == 1);
+    CHECK(runtime->sample_threads.empty());
 }

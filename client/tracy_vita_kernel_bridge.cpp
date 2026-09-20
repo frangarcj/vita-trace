@@ -21,7 +21,15 @@ namespace {
 constexpr uint32_t kDefaultSamplesPerCore = 2048;
 constexpr uint32_t kDefaultControlCapacity = 256;
 constexpr uint32_t kBatchLimit = 256;
+constexpr uint32_t kTidCacheCapacity = 128;
+constexpr uint64_t kTidCacheTtlUs = 1000000ull;
 enum Command { None, Sampling, Stats, PmuConfigure, PmuStart, PmuStop, Detach };
+
+struct TidCacheEntry {
+    uint32_t guid = 0;
+    uint32_t puid = 0;
+    uint64_t refresh_after = 0;
+};
 
 struct Bridge {
     SceUID memblock = -1;
@@ -41,6 +49,9 @@ struct Bridge {
     VitaTracyClockSync clock{};
     uint32_t reported_drops = 0;
     uint32_t allocation_drops = 0;
+    uint32_t tid_resolution_drops = 0;
+    uint32_t tid_cache_next = 0;
+    TidCacheEntry tid_cache[kTidCacheCapacity]{};
 };
 
 Bridge g_bridge;
@@ -93,10 +104,50 @@ void EmitPmu(const VitaTracePmuSample &sample, uint32_t cpu) {
 /* Tracy owns the trace allocation once the item is committed. A kernel
  * sample carries a single PC, so the "callstack" is one frame deep; LR and
  * deeper unwinding arrive in a later phase. */
+bool ResolveSampleThread(const VitaTraceSample &sample, uint32_t &tid) {
+    tid = sample.tid;
+    if (sample.flags & VITA_TRACE_SAMPLE_GLOBAL_TID) {
+        TidCacheEntry *entry = nullptr;
+        bool cache_hit = false;
+        for (auto &candidate : g_bridge.tid_cache) {
+            if (candidate.guid == sample.tid) {
+                entry = &candidate;
+                if (sample.timestamp <= candidate.refresh_after) {
+                    tid = candidate.puid;
+                    cache_hit = true;
+                    break;
+                }
+            }
+        }
+        if (!cache_hit) {
+            const int resolved = vitaTracyResolveThread(sample.tid);
+            if (resolved <= 0) {
+                ++g_bridge.tid_resolution_drops;
+                return false;
+            }
+            if (!entry) {
+                entry = &g_bridge.tid_cache[g_bridge.tid_cache_next++ % kTidCacheCapacity];
+            }
+            entry->guid = sample.tid;
+            entry->puid = (uint32_t)resolved;
+            entry->refresh_after = sample.timestamp + kTidCacheTtlUs;
+            tid = entry->puid;
+        }
+    }
+
+    if (g_bridge.shared) {
+        const auto *header = (const VitaTraceSharedHeader *)g_bridge.shared;
+        if (vita_trace_thread_contains(&header->profiler_threads, tid)) return false;
+    }
+    return true;
+}
+
 void EmitSample(const VitaTraceSample &sample) {
 #ifdef TRACY_ON_DEMAND
     if (!tracy::GetProfiler().IsConnected()) return;
 #endif
+    uint32_t thread = 0;
+    if (!ResolveSampleThread(sample, thread)) return;
     int64_t time = vita_tracy_kernel_us_to_tracy_ns(&g_bridge.clock, sample.timestamp);
 
     auto *trace = (uint64_t *)tracy::tracy_malloc(2 * sizeof(uint64_t));
@@ -109,7 +160,7 @@ void EmitSample(const VitaTraceSample &sample) {
 
     TracyLfqPrepare(tracy::QueueType::CallstackSample);
     tracy::MemWrite(&item->callstackSampleFat.time, time);
-    tracy::MemWrite(&item->callstackSampleFat.thread, sample.tid);
+    tracy::MemWrite(&item->callstackSampleFat.thread, thread);
     tracy::MemWrite(&item->callstackSampleFat.ptr, (uint64_t)trace);
     TracyLfqCommit;
 }
@@ -159,6 +210,14 @@ void EmitWakeStatus(uint32_t events) {
             // Preserve failures for a viewer that connects after the IRQ stopped.
             TracyAppInfo(text, strlen(text));
         }
+        if (events & VITA_TRACY_WAKE_SAMPLE_IRQ(cpu)) {
+            char text[176];
+            snprintf(text, sizeof(text),
+                     "vita-tracy PC sampler c%u stopped: PMU ownership/configuration changed; explicit stop/restart required",
+                     (unsigned)cpu);
+            TracyMessage(text, strlen(text));
+            TracyAppInfo(text, strlen(text));
+        }
     }
 }
 
@@ -174,7 +233,7 @@ bool DrainBatch() {
             remaining |= vita_trace_ring_pending(control) != 0;
         }
 
-        uint32_t dropped = g_bridge.allocation_drops;
+        uint32_t dropped = g_bridge.allocation_drops + g_bridge.tid_resolution_drops;
         if (control) dropped += vita_trace_ring_dropped(control);
         for (uint32_t cpu = 0; cpu < VITA_TRACE_CORE_COUNT; ++cpu) {
             void *ring = vita_trace_shared_core_ring(g_bridge.shared, cpu);
@@ -420,6 +479,9 @@ int vita_tracy_kernel_attach(uint32_t samples_per_core, uint32_t control_capacit
 
     g_bridge.reported_drops = 0;
     g_bridge.allocation_drops = 0;
+    g_bridge.tid_resolution_drops = 0;
+    g_bridge.tid_cache_next = 0;
+    memset(g_bridge.tid_cache, 0, sizeof(g_bridge.tid_cache));
 
     /* The register call emits a clock sync record carrying the kernel tick
      * taken inside that window. */
