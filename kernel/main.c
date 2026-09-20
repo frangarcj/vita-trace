@@ -41,6 +41,11 @@ int module_stop(SceSize args, void *argp) {
 
     VitaTracyKernelState *st = vita_tracy_state();
 
+    /* Excpmgr exposes registration but no unregister operation. Once the
+     * experimental IRQ observer is installed its code must remain resident
+     * until reboot; refusing unload is safer than leaving a dangling branch. */
+    if (vita_tracy_sampler_irq_handler_registered()) return SCE_KERNEL_STOP_CANCEL;
+
     if (!vita_trace_control_enter(&st->control)) return SCE_KERNEL_STOP_CANCEL;
     st->shutdown_requested = 1;
     if (vita_tracy_detach(st) < 0) goto cancel;

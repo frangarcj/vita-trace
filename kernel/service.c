@@ -130,6 +130,31 @@ int vitaTracyWaitForData(uint32_t timeout_us) {
     return ret;
 }
 
+int vitaTracyResolveThread(uint32_t global_tid) {
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+    VitaTracyKernelState *st = vita_tracy_state();
+    int ret = vita_tracy_control_begin(st);
+    if (ret == 0) {
+        const SceUID caller_pid = ksceKernelGetProcessId();
+        if (!global_tid || st->target_pid == 0 || caller_pid != st->target_pid) {
+            ret = VITA_TRACY_ERROR_TARGET;
+        } else {
+            SceKernelThreadInfo info;
+            memset(&info, 0, sizeof(info));
+            info.size = sizeof(info);
+            ret = ksceKernelGetThreadInfo((SceUID)global_tid, &info);
+            if (ret >= 0) {
+                if (info.processId != st->target_pid) ret = VITA_TRACY_ERROR_TARGET;
+                else ret = ksceKernelGetUserThreadId((SceUID)global_tid);
+            }
+        }
+        vita_tracy_control_end(st);
+    }
+    EXIT_SYSCALL(syscall_state);
+    return ret;
+}
+
 int vita_tracy_detach(VitaTracyKernelState *st) {
     int ret = vita_tracy_sampler_stop(st);
     if (ret < 0) return ret;
@@ -309,8 +334,12 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
         local.abi_version != VITA_TRACY_ABI_VERSION) {
         return VITA_TRACY_ERROR_ABI;
     }
+    const uint32_t allowed_sampling = VITA_TRACY_SAMPLING_ALLOW_SUSPEND |
+                                      VITA_TRACY_SAMPLING_PMU_IRQ;
     if (local.frequency_hz > VITA_TRACY_MAX_SAMPLE_HZ ||
-        (local.flags & ~VITA_TRACY_SAMPLING_ALLOW_SUSPEND)) return VITA_TRACY_ERROR_ARGS;
+        (local.flags & ~allowed_sampling) ||
+        ((local.flags & allowed_sampling) == allowed_sampling))
+        return VITA_TRACY_ERROR_ARGS;
 
     if (st->state != VITA_TRACY_STATE_ATTACHED && st->state != VITA_TRACY_STATE_PROFILING &&
         st->state != VITA_TRACY_STATE_STOPPED) {
@@ -441,10 +470,17 @@ static int vitaTracyGetStats_impl(VitaTracyStats *stats) {
     LOAD_STAT(pmu_active_mask);
     LOAD_STAT(pmu_last_error);
     LOAD_STAT(last_cleanup_error);
+    LOAD_STAT(sample_irq_arm_mhz);
+    LOAD_STAT(sample_irq_core_mask);
+    LOAD_STAT(sample_irq_last_error);
+    LOAD_STAT(sample_irq_handler_registered);
     for (uint32_t i = 0; i < VITA_TRACE_CORE_COUNT; ++i) {
         LOAD_STAT(samples_emitted[i]); LOAD_STAT(samples_dropped[i]);
         LOAD_STAT(pmu_records[i]); LOAD_STAT(pmu_dropped[i]); LOAD_STAT(pmu_gaps[i]);
         LOAD_STAT(pmu_wrong_cpu[i]); LOAD_STAT(pmu_counter_errors[i]);
+        LOAD_STAT(sample_irq_calls[i]); LOAD_STAT(sample_irq_overflows[i]);
+        LOAD_STAT(sample_irq_not_target[i]); LOAD_STAT(sample_irq_kernel[i]);
+        LOAD_STAT(sample_irq_context_errors[i]);
     }
 #undef LOAD_STAT
     if (ksceKernelCopyToUserProc(caller_pid, stats, &local, sizeof(local)) < 0) {

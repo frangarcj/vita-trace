@@ -118,10 +118,17 @@ int vita_tracy_sampler_start(VitaTracyKernelState *st) {
         return VITA_TRACY_OK;
     }
 
+    if (st->sampling_flags & VITA_TRACY_SAMPLING_PMU_IRQ) {
+        int ret = vita_tracy_sampler_irq_start(st);
+        if (ret == VITA_TRACY_OK) st->sampler_backend = VITA_TRACY_SAMPLER_PMU_IRQ;
+        return ret;
+    }
+
     /* Prefer a source that does not stop the target; the fallback below is
-     * used only while that source does not exist. */
+     * entered only by explicit diagnostic opt-in. */
     int ret = vita_tracy_sampler_pamgr_start(st);
     if (ret == VITA_TRACY_OK) {
+        st->sampler_backend = VITA_TRACY_SAMPLER_PAMGR;
         return VITA_TRACY_OK;
     }
 
@@ -154,14 +161,26 @@ int vita_tracy_sampler_start(VitaTracyKernelState *st) {
         return VITA_TRACY_ERROR_STATE;
     }
 
+    st->sampler_backend = VITA_TRACY_SAMPLER_SUSPEND;
     return VITA_TRACY_OK;
 }
 
 int vita_tracy_sampler_stop(VitaTracyKernelState *st) {
-    vita_tracy_sampler_pamgr_stop(st);
+    if (st->sampler_backend == VITA_TRACY_SAMPLER_PMU_IRQ) {
+        int ret = vita_tracy_sampler_irq_stop(st);
+        if (ret >= 0) st->sampler_backend = VITA_TRACY_SAMPLER_NONE;
+        return ret;
+    }
+    if (st->sampler_backend == VITA_TRACY_SAMPLER_PAMGR) {
+        vita_tracy_sampler_pamgr_stop(st);
+        st->sampler_backend = VITA_TRACY_SAMPLER_NONE;
+        return 0;
+    }
 
     if (st->sampler_thread <= 0) {
-        return vita_tracy_tick_stop(&st->sample_clock);
+        int ret = vita_tracy_tick_stop(&st->sample_clock);
+        if (ret >= 0) st->sampler_backend = VITA_TRACY_SAMPLER_NONE;
+        return ret;
     }
 
     __atomic_store_n(&st->sampler_should_run, 0, __ATOMIC_RELEASE);
@@ -171,5 +190,7 @@ int vita_tracy_sampler_stop(VitaTracyKernelState *st) {
     ret = ksceKernelDeleteThread(st->sampler_thread);
     if (ret < 0) return ret;
     st->sampler_thread = 0;
-    return vita_tracy_tick_stop(&st->sample_clock);
+    ret = vita_tracy_tick_stop(&st->sample_clock);
+    if (ret >= 0) st->sampler_backend = VITA_TRACY_SAMPLER_NONE;
+    return ret;
 }

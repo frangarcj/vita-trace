@@ -36,7 +36,8 @@ int vitaTracyGetStats(VitaTracyStats *stats);
 #define VITA_TRACY_WAKE_DATA 1u
 #define VITA_TRACY_WAKE_PMU_CPU(cpu) (1u << (4u + (cpu)))
 #define VITA_TRACY_WAKE_PMU_COUNTER(cpu) (1u << (8u + (cpu)))
-#define VITA_TRACY_WAKE_ALL 0xFF1u
+#define VITA_TRACY_WAKE_SAMPLE_IRQ(cpu) (1u << (12u + (cpu)))
+#define VITA_TRACY_WAKE_ALL 0xFFF1u
 
 /* One consumer waits for published batches. Notifications are retained
  * when they arrive before the wait; wake is also used for control requests.
@@ -44,6 +45,9 @@ int vitaTracyGetStats(VitaTracyStats *stats);
  * timeout_us == 0 waits indefinitely. Only the attached process may call. */
 int vitaTracyWaitForData(uint32_t timeout_us);
 int vitaTracyWakeup(void);
+/* Resolve the global thread UID captured in exception context to the
+ * process-local UID Tracy uses. Called by the user worker, never from IRQ. */
+int vitaTracyResolveThread(uint32_t global_tid);
 
 /* Timer callbacks read whole-core counters at PL1. SetPmu selects the
  * configuration while stopped; the default is cycles on cores 0..2 at

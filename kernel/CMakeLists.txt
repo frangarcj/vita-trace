@@ -5,6 +5,7 @@ add_executable(tracy_kernel
     pmu_arm.c
     process_events.c
     sampler_debug_fallback.c
+    sampler_irq.c
     sampler_pamgr.c
     service.c
     tick_source.c
@@ -35,8 +36,12 @@ set_property(CACHE VITA_TRACY_FIRMWARE PROPERTY STRINGS 360 363)
 
 if(VITA_TRACY_FIRMWARE STREQUAL "363")
     set(VITA_TRACY_MODULEMGR_STUB SceModulemgrForKernel_363_stub)
+    set(VITA_TRACY_EXCPMGR_STUB SceExcpmgrForKernel_363_stub)
+    set(VITA_TRACY_THREADMGR_KERNEL_STUB SceThreadmgrForKernel_363_stub)
 elseif(VITA_TRACY_FIRMWARE STREQUAL "360")
     set(VITA_TRACY_MODULEMGR_STUB SceModulemgrForKernel_stub)
+    set(VITA_TRACY_EXCPMGR_STUB SceExcpmgrForKernel_stub)
+    set(VITA_TRACY_THREADMGR_KERNEL_STUB SceThreadmgrForKernel_stub)
 else()
     message(FATAL_ERROR "Unsupported VITA_TRACY_FIRMWARE '${VITA_TRACY_FIRMWARE}'; expected 360 or 363")
 endif()
@@ -49,6 +54,9 @@ target_link_libraries(tracy_kernel
     SceSysmemForDriver_stub
     SceThreadmgrForDriver_stub
     SceSystimerForDriver_stub
+    ScePowerForDriver_stub
+    ${VITA_TRACY_EXCPMGR_STUB}
+    ${VITA_TRACY_THREADMGR_KERNEL_STUB}
     ${VITA_TRACY_MODULEMGR_STUB}
 )
 

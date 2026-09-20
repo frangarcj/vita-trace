@@ -24,6 +24,8 @@ typedef enum VitaTraceEventType {
 #define VITA_TRACE_CPU_UNKNOWN 0xFFFFu
 #define VITA_TRACE_SAMPLE_DEBUG_SUSPEND 1u
 #define VITA_TRACE_SAMPLE_THUMB 2u
+#define VITA_TRACE_SAMPLE_PMU_IRQ 4u
+#define VITA_TRACE_SAMPLE_GLOBAL_TID 8u
 typedef struct VitaTraceSample {
     uint64_t timestamp;
     uint32_t pid;

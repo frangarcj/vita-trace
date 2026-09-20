@@ -30,6 +30,7 @@ typedef struct VitaTracyKernelState {
     VitaTracyTickSource sample_clock;
     SceUID data_event;
     uint32_t control_writer_lock;
+    uint32_t sampler_backend;
 
     /* The thread that called vitaTracySetSampling, captured when the
      * sampler starts. The debug fallback sampler must never suspend it --
@@ -38,6 +39,13 @@ typedef struct VitaTracyKernelState {
 
     VitaTracyStats stats;
 } VitaTracyKernelState;
+
+enum {
+    VITA_TRACY_SAMPLER_NONE = 0,
+    VITA_TRACY_SAMPLER_PAMGR,
+    VITA_TRACY_SAMPLER_SUSPEND,
+    VITA_TRACY_SAMPLER_PMU_IRQ
+};
 
 VitaTracyKernelState *vita_tracy_state(void);
 
@@ -66,6 +74,9 @@ int vita_tracy_proc_events_unregister(VitaTracyKernelState *st);
 
 int vita_tracy_sampler_start(VitaTracyKernelState *st);
 int vita_tracy_sampler_stop(VitaTracyKernelState *st);
+int vita_tracy_sampler_irq_start(VitaTracyKernelState *st);
+int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st);
+int vita_tracy_sampler_irq_handler_registered(void);
 
 int vita_tracy_pmu_configure(VitaTracyKernelState *st, const VitaTracyPmuConfig *cfg);
 

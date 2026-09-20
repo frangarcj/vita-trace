@@ -67,11 +67,13 @@ int vita_pmu_overflow_acquire(VitaPmuOverflow *overflow, const VitaPmuIo *io,
 int vita_pmu_overflow_service(VitaPmuOverflow *overflow, const VitaPmuIo *io) {
     if (!overflow || !overflow->acquired || !overflow->armed || !io || !io->read || !io->write)
         return VITA_PMU_ERROR_ARGS;
+    /* This observer sees every IRQ while active. PMOVSR is the cheap source
+     * discriminator; only an actual cycle overflow pays the ownership checks. */
+    if (!(read_reg(io, VITA_PMU_OVSR) & VITA_PMU_CYCLE_BIT)) return 0;
     if (!owns_registers(overflow, io)) {
         overflow->acquired = 0;
         return VITA_PMU_ERROR_OWNERSHIP;
     }
-    if (!(read_reg(io, VITA_PMU_OVSR) & VITA_PMU_CYCLE_BIT)) return 0;
 
     /* PMOVSR is W1C. Reload after clearing so the next period starts at this
      * handler rather than accumulating an unknown amount of handler latency. */
