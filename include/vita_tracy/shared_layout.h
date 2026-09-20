@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "vita_tracy/config.h"
+#include "vita_tracy/thread_registry.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -44,6 +45,7 @@ typedef struct VitaTraceSharedHeader {
     uint32_t control_capacity;
     uint32_t core_ring_offset[VITA_TRACE_CORE_COUNT];
     uint32_t control_ring_offset;
+    VitaTraceThreadRegistry profiler_threads;
 } VitaTraceSharedHeader;
 
 /* Bytes needed for a block holding `sample_capacity` samples per core and

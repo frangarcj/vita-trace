@@ -50,6 +50,7 @@ int vita_trace_shared_init(void *mem, size_t mem_size, uint32_t target_pid, uint
     hdr->core_count = VITA_TRACE_CORE_COUNT;
     hdr->sample_capacity = sample_capacity;
     hdr->control_capacity = control_capacity;
+    memset(&hdr->profiler_threads, 0, sizeof(hdr->profiler_threads));
 
     size_t offset = align_up(sizeof(VitaTraceSharedHeader));
     size_t sample_ring = align_up(vita_trace_ring_layout_size(sample_capacity, sizeof(VitaTraceSample)));

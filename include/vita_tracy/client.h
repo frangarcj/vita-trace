@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "vita_tracy/abi.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,9 +55,18 @@ int vita_tracy_kernel_attach(uint32_t samples_per_core, uint32_t control_capacit
 
 /* Stops draining, unregisters and frees the shared block. */
 void vita_tracy_kernel_detach(void);
+/* Same operation, reporting a shutdown failure. Resources are retained on
+ * failure rather than freed while a kernel producer could still use them. */
+int vita_tracy_kernel_detach_checked(void);
 
 /* Requests kernel sampling at the given rate. 0 stops sampling. */
 int vita_tracy_kernel_set_sampling(uint32_t frequency_hz);
+/* Explicit opt-in to intrusive diagnostics; see VITA_TRACY_SAMPLING_* in
+ * abi.h. Control runs on the bridge worker, never permanently excluding main. */
+int vita_tracy_kernel_set_sampling_ex(uint32_t frequency_hz, uint32_t flags);
+int vita_tracy_kernel_get_stats(VitaTracyStats *stats);
+int vita_tracy_kernel_pmu_sample_start(void);
+int vita_tracy_kernel_pmu_sample_stop(void);
 
 #ifdef __cplusplus
 }

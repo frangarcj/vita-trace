@@ -9,6 +9,7 @@ add_executable(tracy_kernel
     tick_source.c
     ${VITA_TRACY_SOURCE_DIR}/common/shared_layout.c
     ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
+    ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c
     state.c
 )
 

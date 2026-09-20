@@ -2,6 +2,7 @@ add_library(tracy_vita STATIC
     ${VITA_TRACY_SOURCE_DIR}/third_party/tracy/public/TracyClient.cpp
     ${VITA_TRACY_SOURCE_DIR}/common/shared_layout.c
     ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
+    ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c
     clock_sync.c
     pmu_delta.c
     timebase_convert.c
@@ -11,6 +12,7 @@ add_library(tracy_vita STATIC
     tracy_vita_init.cpp
     tracy_vita_kernel_bridge.cpp
     tracy_vita_time.cpp
+    tracy_vita_threads.cpp
 )
 
 target_include_directories(tracy_vita PUBLIC

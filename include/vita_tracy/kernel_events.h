@@ -20,6 +20,9 @@ typedef enum VitaTraceEventType {
 } VitaTraceEventType;
 
 /* Fixed-size record for the per-core sample rings. */
+#define VITA_TRACE_CPU_UNKNOWN 0xFFFFu
+#define VITA_TRACE_SAMPLE_DEBUG_SUSPEND 1u
+#define VITA_TRACE_SAMPLE_THUMB 2u
 typedef struct VitaTraceSample {
     uint64_t timestamp;
     uint32_t pid;

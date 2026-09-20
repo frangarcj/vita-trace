@@ -4,14 +4,14 @@ VitaTracyKernel:
   imagemodule: false
   version:
     major: 1
-    minor: 1
+    minor: 25
   main:
     start: module_start
     stop: module_stop
   libraries:
     VitaTracyKernel:
       syscall: true
-      version: 1
+      version: 25
       functions:
         - vitaTracyRegister
         - vitaTracyUnregister
@@ -21,3 +21,5 @@ VitaTracyKernel:
         - vitaTracyGetStats
         - vitaTracyPmuSampleStart
         - vitaTracyPmuSampleStop
+        - vitaTracyWaitForData
+        - vitaTracyWakeup

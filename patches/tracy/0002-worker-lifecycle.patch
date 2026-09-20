@@ -1,0 +1,34 @@
+diff --git a/public/client/TracyThread.hpp b/public/client/TracyThread.hpp
+index f95627d4..7e4af1f8 100644
+--- a/public/client/TracyThread.hpp
++++ b/public/client/TracyThread.hpp
+@@ -7,6 +7,10 @@
+ #  include <pthread.h>
+ #endif
+ 
++#ifdef TRACY_PLATFORM_HEADER
++#  include TRACY_PLATFORM_HEADER
++#endif
++
+ #ifdef TRACY_MANUAL_LIFETIME
+ #  include "../common/TracyAlloc.hpp"
+ #endif
+@@ -81,7 +85,17 @@ public:
+     pthread_t Handle() const { return m_thread; }
+ 
+ private:
+-    static void* Launch( void* ptr ) { ((Thread*)ptr)->m_func( ((Thread*)ptr)->m_ptr ); return nullptr; }
++    static void* Launch( void* ptr )
++    {
++#ifdef TRACY_PLATFORM_THREAD_ENTER
++        TRACY_PLATFORM_THREAD_ENTER();
++#endif
++        ((Thread*)ptr)->m_func( ((Thread*)ptr)->m_ptr );
++#ifdef TRACY_PLATFORM_THREAD_EXIT
++        TRACY_PLATFORM_THREAD_EXIT();
++#endif
++        return nullptr;
++    }
+     void(*m_func)( void* ptr );
+     void* m_ptr;
+     pthread_t m_thread;

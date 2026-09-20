@@ -17,6 +17,8 @@ add_executable(vita_tracy_tests
     shared_layout_test.cpp
     state_test.cpp
     timebase_test.cpp
+    thread_registry_test.cpp
+    ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c
     ${CMAKE_SOURCE_DIR}/common/shared_layout.c
     ${CMAKE_SOURCE_DIR}/common/shared_ring.c
     ${CMAKE_SOURCE_DIR}/kernel/state.c

@@ -43,6 +43,8 @@ int vita_tracy_perf_module_status(void) {
 }
 
 void vita_tracy_shutdown(void) {
+    /* Never destroy Tracy while the bridge can still enqueue events. */
+    if (vita_tracy_kernel_detach_checked() < 0) return;
 #if defined(TRACY_DELAYED_INIT) && defined(TRACY_MANUAL_LIFETIME)
     if (g_profiler_started) {
         tracy::ShutdownProfiler();

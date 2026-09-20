@@ -34,6 +34,9 @@ extern "C" {
 
 uint32_t PlatformGetThreadId(void);
 int64_t tracy_vita_get_time(void);
+void tracy_vita_profiler_thread_enter(void);
+void tracy_vita_profiler_thread_exit(void);
+void tracy_vita_profiler_threads_bind(void *shared);
 
 void *PlatformMalloc(size_t size);
 void *PlatformRealloc(void *ptr, size_t size);
@@ -58,3 +61,5 @@ bool PlatformSafeMemcpy(void *dst, const void *src, size_t size);
 #define TRACY_HAS_CUSTOM_USER_INFO
 #define TRACY_HAS_CUSTOM_SAFE_COPY
 #define TRACY_PLATFORM_GET_TIME tracy_vita_get_time
+#define TRACY_PLATFORM_THREAD_ENTER tracy_vita_profiler_thread_enter
+#define TRACY_PLATFORM_THREAD_EXIT tracy_vita_profiler_thread_exit

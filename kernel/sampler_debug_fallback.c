@@ -4,6 +4,7 @@
 
 #include "internal.h"
 #include "vita_tracy/kernel_abi.h"
+#include "vita_tracy/shared_layout.h"
 
 /* Bring-up sampler only.
  *
@@ -21,25 +22,56 @@
 #define VITA_TRACY_SUSPEND_STATUS 0x1002
 #define VITA_TRACY_RESUME_STATUS 0x0002
 
+/* Names cannot identify ownership: VitaSDK calls both application workers
+ * and Tracy workers "pthread". The client publishes only its own PUIDs. */
+
 static int sampler_thread(SceSize args, void *argp) {
     (void)args;
     (void)argp;
 
     VitaTracyKernelState *st = vita_tracy_state();
 
-    while (st->sampler_should_run) {
-        uint32_t hz = st->sampling_hz;
-        if (hz == 0) {
-            hz = VITA_TRACE_DEFAULT_SAMPLE_HZ;
-        }
+    while (__atomic_load_n(&st->sampler_should_run, __ATOMIC_ACQUIRE)) {
+        if (vita_tracy_tick_wait(&st->sample_clock) < 0) break;
+        if (!__atomic_load_n(&st->sampler_should_run, __ATOMIC_ACQUIRE)) break;
+        __atomic_fetch_add(&st->stats.diagnostic_batches, 1u, __ATOMIC_RELAXED);
 
         SceUID thids[VITA_TRACY_MAX_THREADS];
         int copied = 0;
 
-        if (ksceKernelGetThreadIdList(st->target_pid, thids, VITA_TRACY_MAX_THREADS, &copied) >= 0) {
-            uint64_t now = vita_tracy_kernel_now();
+        VitaTraceSharedHeader *shared = (VitaTraceSharedHeader *)st->shared;
+        if (!vita_trace_thread_registry_complete(&shared->profiler_threads)) {
+            st->stats.registry_incomplete_ticks++;
+        } else if (ksceKernelGetThreadIdList(st->target_pid, thids, VITA_TRACY_MAX_THREADS, &copied) >= 0) {
 
-            for (int i = 0; i < copied && st->sampler_should_run; ++i) {
+            for (int i = 0; i < copied && i < VITA_TRACY_MAX_THREADS &&
+                 __atomic_load_n(&st->sampler_should_run, __ATOMIC_ACQUIRE); ++i) {
+                /* Never suspend the thread driving the profiler's own
+                 * control calls (vitaTracySetSampling, vitaTracyGetStats,
+                 * ...): confirmed on hardware 2026-08-21 that catching it
+                 * mid-syscall -- most easily done by simply existing in
+                 * the thread list the very first tick after it just
+                 * called vitaTracySetSampling -- hangs the process with
+                 * no crash dump, because the suspend lands before it has
+                 * fully unwound back to ordinary userland code. */
+                if (thids[i] == st->control_thread) {
+                    continue;
+                }
+                /* The list contains global kernel UIDs; Tracy zones carry
+                 * process-local IDs returned by sceKernelGetThreadId. */
+                SceUID puid = ksceKernelGetUserThreadId(thids[i]);
+                if (puid < 0 || vita_trace_thread_contains(&shared->profiler_threads, (uint32_t)puid)) {
+                    continue;
+                }
+
+                SceKernelThreadInfo info;
+                memset(&info, 0, sizeof(info));
+                info.size = sizeof(info);
+                if (ksceKernelGetThreadInfo(thids[i], &info) < 0 ||
+                    (info.status != SCE_THREAD_RUNNING && info.status != SCE_THREAD_READY)) {
+                    continue; /* Do not present sleeping/debug-stopped threads as CPU work. */
+                }
+
                 SceThreadCpuRegisters regs;
                 memset(&regs, 0, sizeof(regs));
 
@@ -50,21 +82,31 @@ static int sampler_thread(SceSize args, void *argp) {
                 if (ksceKernelGetThreadCpuRegisters(thids[i], &regs) >= 0) {
                     VitaTraceSample sample;
                     memset(&sample, 0, sizeof(sample));
-                    sample.timestamp = now;
+                    sample.timestamp = vita_tracy_kernel_now();
                     sample.pid = (uint32_t)st->target_pid;
-                    sample.tid = (uint32_t)thids[i];
+                    sample.tid = (uint32_t)puid;
                     sample.pc = regs.entry[0].pc;
                     sample.sp = regs.entry[0].sp;
                     sample.lr = regs.entry[0].lr;
-                    sample.cpu = (uint16_t)ksceKernelCpuId();
-                    vita_tracy_emit_sample(st, sample.cpu, &sample);
+                    sample.cpu = VITA_TRACE_CPU_UNKNOWN;
+                    sample.flags = VITA_TRACE_SAMPLE_DEBUG_SUSPEND;
+                    if (regs.entry[0].cpsr & (1u << 5)) sample.flags |= VITA_TRACE_SAMPLE_THUMB;
+                    /* Ring 0 is this single producer's transport, not a
+                     * claim about which core executed the sampled thread. */
+                    vita_tracy_emit_sample(st, 0, &sample);
+                } else {
+                    st->stats.sample_read_failures++;
                 }
 
-                ksceKernelDebugResumeThread(thids[i], VITA_TRACY_RESUME_STATUS);
+                if (ksceKernelDebugResumeThread(thids[i], VITA_TRACY_RESUME_STATUS) < 0) {
+                    st->stats.sample_resume_failures++;
+                    __atomic_store_n(&st->sampler_should_run, 0, __ATOMIC_RELEASE);
+                    break;
+                }
             }
         }
 
-        ksceKernelDelayThread(1000000u / hz);
+        vita_tracy_notify(st); /* One notification per batch, not per sample. */
     }
 
     return 0;
@@ -82,18 +124,32 @@ int vita_tracy_sampler_start(VitaTracyKernelState *st) {
         return VITA_TRACY_OK;
     }
 
+    if (!(st->sampling_flags & VITA_TRACY_SAMPLING_ALLOW_SUSPEND)) {
+        return VITA_TRACY_ERROR_UNSUPPORTED;
+    }
+
+    /* The calling thread -- still executing this same syscall -- is the
+     * one sampler_thread must never suspend. See the comment above its
+     * suspend loop. */
+    st->control_thread = (SceUID)ksceKernelGetThreadId();
+
+    ret = vita_tracy_tick_start(&st->sample_clock, st->sampling_hz);
+    if (ret < 0) return ret;
+
     SceUID thid = ksceKernelCreateThread("VitaTracySampler", sampler_thread, 0x40, 0x2000, 0, 0, NULL);
     if (thid < 0) {
+        vita_tracy_tick_stop(&st->sample_clock);
         return VITA_TRACY_ERROR_STATE;
     }
 
     st->sampler_thread = thid;
-    st->sampler_should_run = 1;
+    __atomic_store_n(&st->sampler_should_run, 1, __ATOMIC_RELEASE);
 
     if (ksceKernelStartThread(thid, 0, NULL) < 0) {
-        st->sampler_should_run = 0;
+        __atomic_store_n(&st->sampler_should_run, 0, __ATOMIC_RELEASE);
         ksceKernelDeleteThread(thid);
         st->sampler_thread = 0;
+        vita_tracy_tick_stop(&st->sample_clock);
         return VITA_TRACY_ERROR_STATE;
     }
 
@@ -104,11 +160,14 @@ void vita_tracy_sampler_stop(VitaTracyKernelState *st) {
     vita_tracy_sampler_pamgr_stop(st);
 
     if (st->sampler_thread <= 0) {
+        vita_tracy_tick_stop(&st->sample_clock);
         return;
     }
 
-    st->sampler_should_run = 0;
+    __atomic_store_n(&st->sampler_should_run, 0, __ATOMIC_RELEASE);
+    vita_tracy_tick_wake(&st->sample_clock);
     ksceKernelWaitThreadEnd(st->sampler_thread, NULL, NULL);
     ksceKernelDeleteThread(st->sampler_thread);
     st->sampler_thread = 0;
+    vita_tracy_tick_stop(&st->sample_clock);
 }

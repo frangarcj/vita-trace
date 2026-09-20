@@ -6,7 +6,11 @@
 extern "C" {
 #endif
 
-#define VITA_TRACY_ABI_VERSION 1u
+#define VITA_TRACY_ABI_VERSION 2u
+
+/* Suspend/read/resume is a diagnostic, not CPU-time sampling. Never enable
+ * it as an implicit fallback when an interrupt sampler is unavailable. */
+#define VITA_TRACY_SAMPLING_ALLOW_SUSPEND 1u
 #define VITA_TRACY_MAX_SAMPLE_HZ 1000u
 
 /* Every request struct starts with size + abi_version so the receiver can
@@ -46,8 +50,8 @@ typedef struct VitaTracyPmuConfig {
 typedef struct VitaTracyStats {
     uint32_t size;
     uint32_t abi_version;
-    uint32_t samples_emitted[4]; /* per core */
-    uint32_t samples_dropped[4]; /* per core */
+    uint32_t samples_emitted[4]; /* per transport ring; diagnostic uses ring 0 */
+    uint32_t samples_dropped[4]; /* not per-core CPU attribution in diagnostic mode */
     uint32_t control_dropped;
     uint32_t uptime_ms;
 
@@ -65,6 +69,12 @@ typedef struct VitaTracyStats {
      * execution" from "does it advance across mostly-idle wall-clock
      * time", which pmu_cycle_delta_total alone cannot distinguish. */
     uint32_t pmu_busy_loop_cycles;
+    uint32_t sampling_flags;
+    uint32_t registry_incomplete_ticks;
+    uint32_t sample_read_failures;
+    uint32_t sample_resume_failures;
+    uint32_t timer_ticks;
+    uint32_t diagnostic_batches;
 } VitaTracyStats;
 
 #ifdef __cplusplus

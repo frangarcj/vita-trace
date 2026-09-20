@@ -28,6 +28,18 @@ int vitaTracySetSampling(const VitaTracySamplingConfig *cfg);
 int vitaTracySetPmu(const VitaTracyPmuConfig *cfg);
 int vitaTracySnapshotModules(uint32_t target_pid);
 int vitaTracyGetStats(VitaTracyStats *stats);
+
+/* One consumer waits for published batches. Notifications are retained
+ * when they arrive before the wait; wake is also used for control requests.
+ * timeout_us == 0 waits indefinitely. Only the attached process may call. */
+int vitaTracyWaitForData(uint32_t timeout_us);
+int vitaTracyWakeup(void);
+
+/* Starts/stops a kernel-owned PMCCNTR sampler (kernel/pmu.c): a dedicated
+ * kernel thread reads the cycle counter at PL1 and accumulates it into
+ * VitaTracyStats.pmu_cycle_delta_total, entirely avoiding userland CP15
+ * access. No config struct -- fixed to one core, cycle counter only,
+ * for now. */
 int vitaTracyPmuSampleStart(void);
 int vitaTracyPmuSampleStop(void);
 

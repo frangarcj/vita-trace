@@ -2,6 +2,9 @@
 #include <psp2/kernel/threadmgr.h>
 
 #include <string.h>
+#include <atomic>
+#include <mutex>
+#include "tracy_vita_platform.hpp"
 
 #include <tracy/Tracy.hpp>
 #include <client/TracyProfiler.hpp>
@@ -17,27 +20,43 @@ namespace {
 
 constexpr uint32_t kDefaultSamplesPerCore = 2048;
 constexpr uint32_t kDefaultControlCapacity = 256;
-constexpr uint32_t kDrainIntervalUs = 10000;
+constexpr uint32_t kBatchLimit = 256;
+enum Command { None, Sampling, Stats, PmuStart, PmuStop, Detach };
 
 struct Bridge {
     SceUID memblock = -1;
     void *shared = nullptr;
     uint32_t size = 0;
     SceUID drain_thread = -1;
-    volatile int draining = 0;
+    std::atomic<bool> draining{false};
+    std::atomic<int> command{None};
+    std::atomic<int> command_result{0};
+    SceUID command_done = -1;
+    uint32_t requested_hz = 0;
+    uint32_t requested_flags = 0;
+    VitaTracyStats *requested_stats = nullptr;
     VitaTracyClockSync clock{};
     uint32_t reported_drops = 0;
+    uint32_t allocation_drops = 0;
 };
 
 Bridge g_bridge;
+std::mutex g_api_mutex;
 
 /* Tracy owns the trace allocation once the item is committed. A kernel
  * sample carries a single PC, so the "callstack" is one frame deep; LR and
  * deeper unwinding arrive in a later phase. */
 void EmitSample(const VitaTraceSample &sample) {
+#ifdef TRACY_ON_DEMAND
+    if (!tracy::GetProfiler().IsConnected()) return;
+#endif
     int64_t time = vita_tracy_kernel_us_to_tracy_ns(&g_bridge.clock, sample.timestamp);
 
     auto *trace = (uint64_t *)tracy::tracy_malloc(2 * sizeof(uint64_t));
+    if (!trace) {
+        ++g_bridge.allocation_drops;
+        return;
+    }
     trace[0] = 1;
     trace[1] = sample.pc;
 
@@ -54,12 +73,15 @@ void EmitControl(const VitaTraceControlRecord &record) {
         /* Module bases travel as messages so the PC-to-source mapping can
          * be rebuilt on the PC; see tools/symbol_map.py. */
         const auto &mod = record.payload.module_snapshot;
-        for (uint32_t i = 0; i < mod.segment_count; ++i) {
+        for (uint32_t i = 0; i < mod.segment_count && i < VITA_TRACE_MODULE_MAX_SEGMENTS; ++i) {
             char buf[160];
             snprintf(buf, sizeof(buf), "vita-tracy module %s nid=0x%08X seg=%u vaddr=0x%08X size=0x%X",
                      mod.module_name, (unsigned)mod.module_nid, (unsigned)i,
                      (unsigned)mod.segments[i].vaddr, (unsigned)mod.segments[i].memsz);
             TracyMessage(buf, strlen(buf));
+            /* AppInfo is deferred across on-demand connections; an initial
+             * module map must not disappear before the viewer connects. */
+            TracyAppInfo(buf, strlen(buf));
         }
         break;
     }
@@ -77,47 +99,123 @@ void EmitControl(const VitaTraceControlRecord &record) {
     }
 }
 
-int DrainThread(SceSize args, void *argp) {
-    (void)args;
-    (void)argp;
-
-    while (g_bridge.draining) {
+bool DrainBatch() {
+        bool remaining = false;
         void *control = vita_trace_shared_control_ring(g_bridge.shared);
         if (control != nullptr) {
             VitaTraceControlRecord record;
-            while (vita_trace_ring_try_pop(control, &record)) {
+            uint32_t count = 0;
+            while (count++ < kBatchLimit && vita_trace_ring_try_pop(control, &record)) {
                 EmitControl(record);
             }
+            remaining |= vita_trace_ring_pending(control) != 0;
         }
 
-        uint32_t dropped = 0;
+        uint32_t dropped = g_bridge.allocation_drops;
+        if (control) dropped += vita_trace_ring_dropped(control);
         for (uint32_t cpu = 0; cpu < VITA_TRACE_CORE_COUNT; ++cpu) {
             void *ring = vita_trace_shared_core_ring(g_bridge.shared, cpu);
             if (ring == nullptr) {
                 continue;
             }
             VitaTraceSample sample;
-            while (vita_trace_ring_try_pop(ring, &sample)) {
+            uint32_t count = 0;
+            while (count++ < kBatchLimit && vita_trace_ring_try_pop(ring, &sample)) {
                 EmitSample(sample);
             }
             dropped += vita_trace_ring_dropped(ring);
+            remaining |= vita_trace_ring_pending(ring) != 0;
         }
 
         /* Overflow degrades into counted drops rather than blocking the
          * producer, so the loss has to be visible in the capture. */
         if (dropped != g_bridge.reported_drops) {
             g_bridge.reported_drops = dropped;
-            TracyPlot("vita-tracy dropped samples", (int64_t)dropped);
+            TracyPlot("vita-tracy dropped records", (int64_t)dropped);
         }
 
-        sceKernelDelayThread(kDrainIntervalUs);
-    }
+        return remaining;
+}
 
+int DrainThread(SceSize args, void *argp) {
+    (void)args;
+    (void)argp;
+    tracy_vita_profiler_thread_enter();
+    while (g_bridge.draining.load(std::memory_order_acquire)) {
+        const int command = g_bridge.command.exchange(None, std::memory_order_acq_rel);
+        if (command != None) {
+            int result;
+            if (command == Sampling) {
+                VitaTracySamplingConfig cfg{};
+                cfg.size = sizeof(cfg);
+                cfg.abi_version = VITA_TRACY_ABI_VERSION;
+                cfg.frequency_hz = g_bridge.requested_hz;
+                cfg.flags = g_bridge.requested_flags;
+                result = vitaTracySetSampling(&cfg);
+                if (result == 0 && cfg.frequency_hz && (cfg.flags & VITA_TRACY_SAMPLING_ALLOW_SUSPEND)) {
+                    const char *warning = "vita-tracy: intrusive suspend diagnostics; not CPU-time samples";
+                    TracyAppInfo(warning, strlen(warning));
+                }
+            } else if (command == Stats) {
+                result = vitaTracyGetStats(g_bridge.requested_stats);
+            } else if (command == PmuStart) {
+                result = vitaTracyPmuSampleStart();
+            } else if (command == PmuStop) {
+                result = vitaTracyPmuSampleStop();
+            } else {
+                /* Stop producers before releasing the mapping. No application
+                 * thread becomes the sampler's permanently excluded caller. */
+                result = vitaTracyUnregister((uint32_t)sceKernelGetProcessId());
+                if (result == 0) while (DrainBatch()) {}
+                g_bridge.draining.store(false, std::memory_order_release);
+            }
+            g_bridge.command_result.store(result, std::memory_order_release);
+            sceKernelSignalSema(g_bridge.command_done, 1);
+            if (command == Detach) break;
+        }
+        if (DrainBatch()) continue;
+        /* A retained event bit covers the drain-to-wait race, including a
+         * command posted just before this blocking syscall. No idle polling. */
+        const int ret = vitaTracyWaitForData(0);
+        if (ret < 0) {
+            g_bridge.command_result.store(ret, std::memory_order_release);
+            g_bridge.draining.store(false, std::memory_order_release);
+            sceKernelSignalSema(g_bridge.command_done, 1);
+        }
+    }
+    tracy_vita_profiler_thread_exit();
     return 0;
+}
+
+/* g_api_mutex serializes callers; the semaphore is the completion fence. */
+int Submit(Command command) {
+    if (!g_bridge.draining.load(std::memory_order_acquire)) return VITA_TRACY_ERROR_STATE;
+    g_bridge.command.store(command, std::memory_order_release);
+    int ret = vitaTracyWakeup();
+    if (ret < 0) {
+        int expected = command;
+        if (g_bridge.command.compare_exchange_strong(expected, None, std::memory_order_acq_rel)) {
+            return ret;
+        }
+        // Already consumed: wait for completion before reusing the payload.
+    }
+    ret = sceKernelWaitSema(g_bridge.command_done, 1, nullptr);
+    return ret < 0 ? ret : g_bridge.command_result.load(std::memory_order_acquire);
 }
 
 uint32_t RoundUpTo4K(uint32_t value) {
     return (value + 0xFFFu) & ~0xFFFu;
+}
+
+int RollbackAttach(int error) {
+    const int ret = vitaTracyUnregister((uint32_t)sceKernelGetProcessId());
+    if (ret < 0 && ret != VITA_TRACY_ERROR_TARGET) return ret;
+    tracy_vita_profiler_threads_bind(nullptr);
+    sceKernelFreeMemBlock(g_bridge.memblock);
+    g_bridge.memblock = -1;
+    g_bridge.shared = nullptr;
+    g_bridge.size = 0;
+    return error;
 }
 
 
@@ -126,6 +224,7 @@ uint32_t RoundUpTo4K(uint32_t value) {
 extern "C" {
 
 int vita_tracy_kernel_attach(uint32_t samples_per_core, uint32_t control_capacity) {
+    std::lock_guard<std::mutex> lock(g_api_mutex);
     if (g_bridge.shared != nullptr) {
         return VITA_TRACY_ERROR_STATE;
     }
@@ -137,7 +236,7 @@ int vita_tracy_kernel_attach(uint32_t samples_per_core, uint32_t control_capacit
     }
 
     size_t needed = vita_trace_shared_layout_size(samples_per_core, control_capacity);
-    if (needed == 0) {
+    if (needed == 0 || needed > UINT32_MAX - 0xFFFu) {
         return VITA_TRACY_ERROR_ARGS;
     }
 
@@ -169,6 +268,7 @@ int vita_tracy_kernel_attach(uint32_t samples_per_core, uint32_t control_capacit
     args.target_pid = (uint32_t)sceKernelGetProcessId();
     args.ring_user_addr = (uint32_t)(uintptr_t)base;
     args.ring_size = block_size;
+    tracy_vita_profiler_threads_bind(base);
 
     /* Bracket the syscall so the kernel's own clock reading is known to lie
      * between these two Tracy timestamps. */
@@ -177,83 +277,130 @@ int vita_tracy_kernel_attach(uint32_t samples_per_core, uint32_t control_capacit
     int64_t after = tracy_vita_get_time();
 
     if (ret < 0) {
+        tracy_vita_profiler_threads_bind(nullptr);
         sceKernelFreeMemBlock(memblock);
         return ret;
-    }
-
-    /* A weak import for an unloaded plugin may well return zero, so success
-     * is only believed once the kernel has written into the mapping. */
-    if (!vita_trace_shared_is_acknowledged(base)) {
-        sceKernelFreeMemBlock(memblock);
-        return VITA_TRACY_ERROR_UNSUPPORTED;
     }
 
     g_bridge.memblock = memblock;
     g_bridge.shared = base;
     g_bridge.size = block_size;
+    /* Acknowledgement validates the handshake, not plugin residency. */
+    if (!vita_trace_shared_is_acknowledged(base)) {
+        /* The kernel returned success: unregister before freeing, even if
+         * its acknowledgement was malformed. Missing imports are NOT safe
+         * to probe; the caller must establish plugin residency first. */
+        return RollbackAttach(VITA_TRACY_ERROR_UNSUPPORTED);
+    }
+
     g_bridge.reported_drops = 0;
+    g_bridge.allocation_drops = 0;
 
     /* The register call emits a clock sync record carrying the kernel tick
      * taken inside that window. */
     uint64_t kernel_ref = 0;
+    bool have_sync = false;
     void *control = vita_trace_shared_control_ring(base);
     if (control != nullptr) {
         VitaTraceControlRecord record;
         if (vita_trace_ring_try_pop(control, &record) &&
             record.type == VITA_TRACE_CLOCK_SYNC) {
             kernel_ref = record.payload.clock_sync.kernel_tick;
+            have_sync = true;
         }
+    }
+    if (!have_sync) {
+        return RollbackAttach(VITA_TRACY_ERROR_ABI);
     }
     vita_tracy_clock_sync_set(&g_bridge.clock, before, after, kernel_ref);
 
-    g_bridge.draining = 1;
+    g_bridge.command_done = sceKernelCreateSema("VitaTracyCommand", 0, 0, 1, nullptr);
+    if (g_bridge.command_done < 0) {
+        ret = g_bridge.command_done;
+        return RollbackAttach(ret);
+    }
+    g_bridge.command.store(None, std::memory_order_relaxed);
+    g_bridge.draining.store(true, std::memory_order_release);
     SceUID thid = sceKernelCreateThread("VitaTracyDrain", DrainThread, 0x40, 0x4000, 0, 0, nullptr);
-    if (thid < 0) {
-        g_bridge.draining = 0;
-        vitaTracyUnregister(args.target_pid);
-        sceKernelFreeMemBlock(memblock);
-        g_bridge.shared = nullptr;
-        g_bridge.memblock = -1;
-        return thid;
+    ret = thid < 0 ? thid : sceKernelStartThread(thid, 0, nullptr);
+    if (ret < 0) {
+        g_bridge.draining.store(false, std::memory_order_release);
+        if (thid >= 0) sceKernelDeleteThread(thid);
+        sceKernelDeleteSema(g_bridge.command_done);
+        g_bridge.command_done = -1;
+        return RollbackAttach(ret);
     }
 
     g_bridge.drain_thread = thid;
-    sceKernelStartThread(thid, 0, nullptr);
     return 0;
 }
 
 int vita_tracy_kernel_set_sampling(uint32_t frequency_hz) {
+    return vita_tracy_kernel_set_sampling_ex(frequency_hz, 0);
+}
+
+int vita_tracy_kernel_set_sampling_ex(uint32_t frequency_hz, uint32_t flags) {
+    std::lock_guard<std::mutex> lock(g_api_mutex);
     if (g_bridge.shared == nullptr) {
         return VITA_TRACY_ERROR_STATE;
     }
 
-    VitaTracySamplingConfig cfg;
-    memset(&cfg, 0, sizeof(cfg));
-    cfg.size = sizeof(cfg);
-    cfg.abi_version = VITA_TRACY_ABI_VERSION;
-    cfg.frequency_hz = frequency_hz;
-
-    return vitaTracySetSampling(&cfg);
+    g_bridge.requested_hz = frequency_hz;
+    g_bridge.requested_flags = flags;
+    return Submit(Sampling);
 }
 
 void vita_tracy_kernel_detach(void) {
+    (void)vita_tracy_kernel_detach_checked();
+}
+
+int vita_tracy_kernel_get_stats(VitaTracyStats *stats) {
+    if (!stats) return VITA_TRACY_ERROR_ARGS;
+    std::lock_guard<std::mutex> lock(g_api_mutex);
+    g_bridge.requested_stats = stats;
+    return Submit(Stats);
+}
+
+int vita_tracy_kernel_pmu_sample_start(void) {
+    std::lock_guard<std::mutex> lock(g_api_mutex);
+    return Submit(PmuStart);
+}
+
+int vita_tracy_kernel_pmu_sample_stop(void) {
+    std::lock_guard<std::mutex> lock(g_api_mutex);
+    return Submit(PmuStop);
+}
+
+int vita_tracy_kernel_detach_checked(void) {
+    std::lock_guard<std::mutex> lock(g_api_mutex);
     if (g_bridge.shared == nullptr) {
-        return;
+        return 0;
     }
 
+    int ret;
+    if (g_bridge.draining.load(std::memory_order_acquire)) {
+        ret = Submit(Detach);
+        if (ret < 0) return ret;
+    } else {
+        // Recover a failed worker or partially initialized attachment. Do not
+        // free memory while the kernel might still hold the mapping.
+        ret = vitaTracyUnregister((uint32_t)sceKernelGetProcessId());
+        if (ret < 0 && ret != VITA_TRACY_ERROR_TARGET) return ret;
+    }
     if (g_bridge.drain_thread >= 0) {
-        g_bridge.draining = 0;
         sceKernelWaitThreadEnd(g_bridge.drain_thread, nullptr, nullptr);
         sceKernelDeleteThread(g_bridge.drain_thread);
         g_bridge.drain_thread = -1;
     }
 
-    vitaTracyUnregister((uint32_t)sceKernelGetProcessId());
-
+    tracy_vita_profiler_threads_bind(nullptr);
+    if (g_bridge.command_done >= 0) sceKernelDeleteSema(g_bridge.command_done);
+    g_bridge.command_done = -1;
     sceKernelFreeMemBlock(g_bridge.memblock);
     g_bridge.memblock = -1;
     g_bridge.shared = nullptr;
     g_bridge.size = 0;
+    return 0;
 }
 
 } // extern "C"
