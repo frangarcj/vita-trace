@@ -21,15 +21,7 @@ namespace {
 constexpr uint32_t kDefaultSamplesPerCore = 2048;
 constexpr uint32_t kDefaultControlCapacity = 256;
 constexpr uint32_t kBatchLimit = 256;
-constexpr uint32_t kTidCacheCapacity = 128;
-constexpr uint64_t kTidCacheTtlUs = 1000000ull;
 enum Command { None, Sampling, Stats, PmuConfigure, PmuStart, PmuStop, Detach };
-
-struct TidCacheEntry {
-    uint32_t guid = 0;
-    uint32_t puid = 0;
-    uint64_t refresh_after = 0;
-};
 
 struct Bridge {
     SceUID memblock = -1;
@@ -50,8 +42,6 @@ struct Bridge {
     uint32_t reported_drops = 0;
     uint32_t allocation_drops = 0;
     uint32_t tid_resolution_drops = 0;
-    uint32_t tid_cache_next = 0;
-    TidCacheEntry tid_cache[kTidCacheCapacity]{};
 };
 
 Bridge g_bridge;
@@ -107,32 +97,16 @@ void EmitPmu(const VitaTracePmuSample &sample, uint32_t cpu) {
 bool ResolveSampleThread(const VitaTraceSample &sample, uint32_t &tid) {
     tid = sample.tid;
     if (sample.flags & VITA_TRACE_SAMPLE_GLOBAL_TID) {
-        TidCacheEntry *entry = nullptr;
-        bool cache_hit = false;
-        for (auto &candidate : g_bridge.tid_cache) {
-            if (candidate.guid == sample.tid) {
-                entry = &candidate;
-                if (sample.timestamp <= candidate.refresh_after) {
-                    tid = candidate.puid;
-                    cache_hit = true;
-                    break;
-                }
-            }
+        /* Resolve at drain time for every sample. VitaSDK exposes no public
+         * thread start/exit observer that could invalidate a long-lived GUID
+         * cache, and attributing a reused GUID to the old PUID is worse than
+         * paying an explicit worker-side syscall. This is never done in IRQ. */
+        const int resolved = vitaTracyResolveThread(sample.tid);
+        if (resolved <= 0) {
+            ++g_bridge.tid_resolution_drops;
+            return false;
         }
-        if (!cache_hit) {
-            const int resolved = vitaTracyResolveThread(sample.tid);
-            if (resolved <= 0) {
-                ++g_bridge.tid_resolution_drops;
-                return false;
-            }
-            if (!entry) {
-                entry = &g_bridge.tid_cache[g_bridge.tid_cache_next++ % kTidCacheCapacity];
-            }
-            entry->guid = sample.tid;
-            entry->puid = (uint32_t)resolved;
-            entry->refresh_after = sample.timestamp + kTidCacheTtlUs;
-            tid = entry->puid;
-        }
+        tid = (uint32_t)resolved;
     }
 
     if (g_bridge.shared) {
@@ -480,8 +454,6 @@ int vita_tracy_kernel_attach(uint32_t samples_per_core, uint32_t control_capacit
     g_bridge.reported_drops = 0;
     g_bridge.allocation_drops = 0;
     g_bridge.tid_resolution_drops = 0;
-    g_bridge.tid_cache_next = 0;
-    memset(g_bridge.tid_cache, 0, sizeof(g_bridge.tid_cache));
 
     /* The register call emits a clock sync record carrying the kernel tick
      * taken inside that window. */

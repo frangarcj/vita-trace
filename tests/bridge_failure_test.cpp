@@ -264,7 +264,7 @@ TEST_CASE_FIXTURE(Fixture, "bridge preserves asynchronous PC sampler failure mes
     CHECK(runtime->stats_calls == 0);
 }
 
-TEST_CASE_FIXTURE(Fixture, "bridge resolves IRQ global thread IDs outside the sample producer and caches them") {
+TEST_CASE_FIXTURE(Fixture, "bridge resolves every IRQ global thread ID outside the sample producer") {
     REQUIRE(vita_tracy_kernel_attach(8, 8) == 0);
     runtime->resolutions[0x700] = 0x55;
 
@@ -295,7 +295,7 @@ TEST_CASE_FIXTURE(Fixture, "bridge resolves IRQ global thread IDs outside the sa
         REQUIRE(runtime->cv.wait_for(lock, std::chrono::seconds(5),
             [&] { return runtime->sample_threads.size() == 2; }));
         CHECK(runtime->sample_threads[1] == 0x55);
-        CHECK(runtime->resolve_calls == 1);
+        CHECK(runtime->resolve_calls == 2);
     }
 
     runtime->resolutions[0x700] = 0x56;
@@ -305,7 +305,7 @@ TEST_CASE_FIXTURE(Fixture, "bridge resolves IRQ global thread IDs outside the sa
         REQUIRE(runtime->cv.wait_for(lock, std::chrono::seconds(5),
             [&] { return runtime->sample_threads.size() == 3; }));
         CHECK(runtime->sample_threads[2] == 0x56);
-        CHECK(runtime->resolve_calls == 2);
+        CHECK(runtime->resolve_calls == 3);
     }
 }
 
