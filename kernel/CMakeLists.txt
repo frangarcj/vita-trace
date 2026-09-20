@@ -1,6 +1,8 @@
 enable_language(ASM)
 add_executable(tracy_kernel
     main.c
+    firmware_exports.c
+    exports_taihen.c
     module_snapshot.c
     pmu_session.c
     pmu_arm.c
@@ -39,22 +41,12 @@ endif()
 target_compile_definitions(tracy_kernel PRIVATE
     VITA_TRACY_IRQ_CORE_MASK=${VITA_TRACY_IRQ_CORE_MASK})
 
-# Module enumeration lives in SceModulemgrForKernel, whose NIDs differ
-# between firmware branches, so the stub is selected explicitly rather than
-# assumed. 3.60 uses the unsuffixed stub; 3.63 and later use the _363 one.
-set(VITA_TRACY_FIRMWARE "360" CACHE STRING "Target firmware branch (360 or 363)")
-set_property(CACHE VITA_TRACY_FIRMWARE PROPERTY STRINGS 360 363)
-
-if(VITA_TRACY_FIRMWARE STREQUAL "363")
-    set(VITA_TRACY_MODULEMGR_STUB SceModulemgrForKernel_363_stub)
-    set(VITA_TRACY_EXCPMGR_STUB SceExcpmgrForKernel_363_stub)
-    set(VITA_TRACY_THREADMGR_KERNEL_STUB SceThreadmgrForKernel_363_stub)
-elseif(VITA_TRACY_FIRMWARE STREQUAL "360")
-    set(VITA_TRACY_MODULEMGR_STUB SceModulemgrForKernel_stub)
-    set(VITA_TRACY_EXCPMGR_STUB SceExcpmgrForKernel_stub)
-    set(VITA_TRACY_THREADMGR_KERNEL_STUB SceThreadmgrForKernel_stub)
-else()
-    message(FATAL_ERROR "Unsupported VITA_TRACY_FIRMWARE '${VITA_TRACY_FIRMWARE}'; expected 360 or 363")
+# Keep old build scripts usable; all known 360/363 exports now resolve at
+# startup. No revision-specific ForKernel import can reject the ELF first.
+set(VITA_TRACY_FIRMWARE "auto" CACHE STRING "Legacy compatibility hint (auto, 360 or 363)")
+set_property(CACHE VITA_TRACY_FIRMWARE PROPERTY STRINGS auto 360 363)
+if(NOT VITA_TRACY_FIRMWARE MATCHES "^(auto|360|363)$")
+    message(FATAL_ERROR "Unsupported VITA_TRACY_FIRMWARE '${VITA_TRACY_FIRMWARE}'")
 endif()
 
 target_link_libraries(tracy_kernel
@@ -66,9 +58,7 @@ target_link_libraries(tracy_kernel
     SceThreadmgrForDriver_stub
     SceSystimerForDriver_stub
     ScePowerForDriver_stub
-    ${VITA_TRACY_EXCPMGR_STUB}
-    ${VITA_TRACY_THREADMGR_KERNEL_STUB}
-    ${VITA_TRACY_MODULEMGR_STUB}
+    taihenModuleUtils_stub
 )
 
 set_target_properties(tracy_kernel PROPERTIES

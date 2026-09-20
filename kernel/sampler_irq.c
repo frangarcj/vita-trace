@@ -7,6 +7,7 @@
 
 #include "internal.h"
 #include "irq_frame.h"
+#include "firmware_exports.h"
 #include "vita_tracy/kernel_abi.h"
 #include "vita_tracy/pmu_overflow.h"
 
@@ -150,7 +151,7 @@ static int register_handler(VitaTracyKernelState *st) {
         __atomic_store_n(&st->stats.sample_irq_handler_registered, 1u, __ATOMIC_RELEASE);
         return vita_tracy_irq_handler_node[0] ? 0 : VITA_TRACY_ERROR_STATE;
     }
-    int ret = ksceExcpmgrRegisterHandler(SCE_EXCP_IRQ, VITA_TRACY_IRQ_HANDLER_PRIORITY,
+    int ret = vita_tracy_fw_register_handler(SCE_EXCP_IRQ, VITA_TRACY_IRQ_HANDLER_PRIORITY,
                                          vita_tracy_irq_handler_node);
     if (ret < 0) return ret;
     __atomic_store_n(&g_irq.registered, 1u, __ATOMIC_RELEASE);
@@ -190,7 +191,7 @@ static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
     }
 
     SceKernelThreadContextInfo info;
-    if (ksceKernelGetThreadContextInfo(&info) < 0) {
+    if (vita_tracy_fw_thread_context(&info) < 0) {
         __atomic_fetch_add(&st->stats.sample_irq_context_errors[cpu_id], 1u, __ATOMIC_RELAXED);
         return;
     }

@@ -3,6 +3,7 @@
 #include <psp2kern/kernel/threadmgr.h>
 
 #include "internal.h"
+#include "firmware_exports.h"
 #include "vita_tracy/kernel_abi.h"
 
 int module_start(SceSize args, void *argp);
@@ -16,6 +17,7 @@ int module_start(SceSize args, void *argp) {
     VitaTracyKernelState *st = vita_tracy_state();
     memset(st, 0, sizeof(*st));
     vita_tracy_tick_init(&st->sample_clock);
+    if (vita_tracy_firmware_init() < 0) return SCE_KERNEL_START_FAILED;
 
     VitaTracyState next;
     if (!vita_tracy_state_next(st->state, VITA_TRACY_EVENT_INIT, &next)) {

@@ -16,6 +16,7 @@
 extern "C" {
 #include "internal.h"
 #include "irq_frame.h"
+#include "firmware_exports.h"
 #include "vita_tracy/kernel_abi.h"
 #include "vita_tracy/pmu_core.h"
 #include "vita_tracy/shared_layout.h"
@@ -149,7 +150,7 @@ SceKernelIntrStatus ksceKernelCpuResumeIntr(SceKernelIntrStatus value) { return 
 int kscePowerGetArmClockFrequency(void) { return fake.arm_mhz; }
 uint64_t vita_tracy_kernel_now(void) { return fake.now; }
 
-int ksceExcpmgrRegisterHandler(SceExcpKind kind, int priority, void *handler) {
+int vita_tracy_fw_register_handler(SceExcpKind kind, int priority, void *handler) {
     CHECK(kind == SCE_EXCP_IRQ);
     CHECK(priority == 0);
     ++fake.handler_registrations;
@@ -159,7 +160,7 @@ int ksceExcpmgrRegisterHandler(SceExcpKind kind, int priority, void *handler) {
     return fake.handler_result;
 }
 
-int ksceKernelGetThreadContextInfo(SceKernelThreadContextInfo *info) {
+int vita_tracy_fw_thread_context(SceKernelThreadContextInfo *info) {
     ++fake.context_queries;
     if (fake.exit_in_context) {
         vita_trace_control_request(&fake.exit_in_context->control, 123);

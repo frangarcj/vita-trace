@@ -2,6 +2,7 @@
 #include <psp2kern/kernel/sysclib.h>
 
 #include "internal.h"
+#include "firmware_exports.h"
 #include "vita_tracy/kernel_abi.h"
 
 #define VITA_TRACY_MAX_MODULES 96
@@ -13,7 +14,7 @@ int vita_tracy_modules_snapshot(VitaTracyKernelState *st, SceUID pid) {
     SceUID modids[VITA_TRACY_MAX_MODULES];
     SceSize count = VITA_TRACY_MAX_MODULES;
 
-    int ret = ksceKernelGetModuleList(pid, 0x7FFFFFFF, 1, modids, &count);
+    int ret = vita_tracy_fw_module_list(pid, 0x7FFFFFFF, 1, modids, &count);
     if (ret < 0) {
         return VITA_TRACY_ERROR_ARGS;
     }
@@ -25,7 +26,7 @@ int vita_tracy_modules_snapshot(VitaTracyKernelState *st, SceUID pid) {
         memset(&info, 0, sizeof(info));
         info.size = sizeof(info);
 
-        if (ksceKernelGetModuleInfo(pid, modids[i], &info) < 0) {
+        if (vita_tracy_fw_module_info(pid, modids[i], &info) < 0) {
             continue;
         }
 
