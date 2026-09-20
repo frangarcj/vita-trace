@@ -32,6 +32,7 @@ extern "C" {
 /* Rings are separated by a cache line so producers on different cores do
  * not share one. */
 #define VITA_TRACE_SHARED_ALIGN 64u
+#define VITA_TRACE_PMU_RING_CAPACITY 128u
 
 typedef struct VitaTraceSharedHeader {
     uint32_t magic;
@@ -45,6 +46,7 @@ typedef struct VitaTraceSharedHeader {
     uint32_t control_capacity;
     uint32_t core_ring_offset[VITA_TRACE_CORE_COUNT];
     uint32_t control_ring_offset;
+    uint32_t pmu_ring_offset[VITA_TRACE_CORE_COUNT];
     VitaTraceThreadRegistry profiler_threads;
 } VitaTraceSharedHeader;
 
@@ -76,6 +78,7 @@ int vita_trace_shared_is_acknowledged(const void *mem);
  * block. */
 void *vita_trace_shared_core_ring(void *mem, uint32_t cpu);
 void *vita_trace_shared_control_ring(void *mem);
+void *vita_trace_shared_pmu_ring(void *mem, uint32_t cpu);
 
 #ifdef __cplusplus
 }

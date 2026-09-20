@@ -42,6 +42,50 @@ struct Bridge {
 
 Bridge g_bridge;
 std::mutex g_api_mutex;
+// Names are part of Tracy's pointer-based protocol and must stay immutable
+// until profiler shutdown, including across PMU reconfiguration/reconnection.
+char g_pmu_names[VITA_TRACE_CORE_COUNT][256][64]{};
+const char *const g_cycle_names[] = {"pmu c0 whole-core cycles/s", "pmu c1 whole-core cycles/s",
+    "pmu c2 whole-core cycles/s", "pmu c3 whole-core cycles/s"};
+const char *const g_interval_names[] = {"pmu c0 interval us", "pmu c1 interval us",
+    "pmu c2 interval us", "pmu c3 interval us"};
+const char *const g_gap_names[] = {"pmu c0 interval rejected", "pmu c1 interval rejected",
+    "pmu c2 interval rejected", "pmu c3 interval rejected"};
+
+void EmitTimedPlot(const char *name, uint64_t timestamp, double value) {
+    TracyLfqPrepare(tracy::QueueType::PlotDataDouble);
+    tracy::MemWrite(&item->plotDataDouble.name, (uint64_t)name);
+    tracy::MemWrite(&item->plotDataDouble.time,
+        vita_tracy_kernel_us_to_tracy_ns(&g_bridge.clock, timestamp));
+    tracy::MemWrite(&item->plotDataDouble.val, value);
+    TracyLfqCommit;
+}
+
+void EmitPmu(const VitaTracePmuSample &sample, uint32_t cpu) {
+#ifdef TRACY_ON_DEMAND
+    if (!tracy::GetProfiler().IsConnected()) return;
+#endif
+    if (sample.cpu != cpu || sample.count > VITA_PMU_EVENTS) return;
+    const bool gap = sample.flags != 0 || !sample.elapsed_us ||
+                     sample.elapsed_us > VITA_PMU_MAX_INTERVAL_US;
+    EmitTimedPlot(g_gap_names[cpu], sample.timestamp, gap ? 1.0 : 0.0);
+    if (gap) return; // An unknown interval is not a measurement of zero work.
+    const double scale = 1000000.0 / sample.elapsed_us;
+    EmitTimedPlot(g_interval_names[cpu], sample.timestamp, sample.elapsed_us);
+    EmitTimedPlot(g_cycle_names[cpu], sample.timestamp, sample.cycles * scale);
+    for (uint32_t i = 0; i < sample.count; ++i) {
+        const uint32_t event = sample.events[i];
+        if (event > 255u) continue;
+        char *name = g_pmu_names[cpu][event];
+        if (!name[0]) {
+            const char *label = event == 0x68 ? "renamed" : event == 0x60 ? "icache-stall" :
+                event == 0x61 ? "dcache-stall" : event == 0x03 ? "L1D-refill" :
+                event == 0x01 ? "L1I-refill" : event == 0x10 ? "branch-mispredict" : "event";
+            snprintf(name, 64, "pmu c%u whole-core %s 0x%02X/s", (unsigned)cpu, label, (unsigned)event);
+        }
+        EmitTimedPlot(name, sample.timestamp, sample.values[i] * scale);
+    }
+}
 
 /* Tracy owns the trace allocation once the item is committed. A kernel
  * sample carries a single PC, so the "callstack" is one frame deep; LR and
@@ -125,6 +169,14 @@ bool DrainBatch() {
             }
             dropped += vita_trace_ring_dropped(ring);
             remaining |= vita_trace_ring_pending(ring) != 0;
+            void *pmu_ring = vita_trace_shared_pmu_ring(g_bridge.shared, cpu);
+            if (pmu_ring) {
+                VitaTracePmuSample pmu;
+                count = 0;
+                while (count++ < kBatchLimit && vita_trace_ring_try_pop(pmu_ring, &pmu)) EmitPmu(pmu, cpu);
+                dropped += vita_trace_ring_dropped(pmu_ring);
+                remaining |= vita_trace_ring_pending(pmu_ring) != 0;
+            }
         }
 
         /* Overflow degrades into counted drops rather than blocking the

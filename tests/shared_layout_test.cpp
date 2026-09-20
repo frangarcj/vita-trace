@@ -118,6 +118,14 @@ TEST_CASE("every ring lives inside the block and none overlap") {
     size_t control_len = vita_trace_ring_layout_size(kControlCapacity, sizeof(VitaTraceControlRecord));
     CHECK(control_start + control_len <= mem.size());
     spans.emplace_back(control_start, control_len);
+    for (uint32_t cpu = 0; cpu < VITA_TRACE_CORE_COUNT; ++cpu) {
+        void *pmu = vita_trace_shared_pmu_ring(base, cpu);
+        REQUIRE(pmu != nullptr);
+        size_t start = (uint8_t *)pmu - base;
+        size_t len = vita_trace_ring_layout_size(VITA_TRACE_PMU_RING_CAPACITY, sizeof(VitaTracePmuSample));
+        CHECK(start + len <= mem.size());
+        spans.emplace_back(start, len);
+    }
 
     for (size_t i = 0; i < spans.size(); ++i) {
         CHECK(spans[i].first >= sizeof(VitaTraceSharedHeader));
@@ -254,4 +262,30 @@ TEST_CASE("an unacknowledged block is still a valid block") {
     auto mem = make_shared_block();
     CHECK(vita_trace_shared_is_valid(mem.data()) == 1);
     CHECK(vita_trace_shared_is_acknowledged(mem.data()) == 0);
+}
+
+TEST_CASE("PMU rings preserve interval event identity and per-core isolation") {
+    auto mem = make_shared_block();
+    CHECK(vita_trace_shared_pmu_ring(mem.data(), 4) == nullptr);
+    for (uint32_t cpu = 0; cpu < VITA_TRACE_CORE_COUNT; ++cpu) {
+        VitaTracePmuSample sample{};
+        sample.timestamp = 12345678; sample.elapsed_us = 10023; sample.sequence = 7;
+        sample.cpu = cpu; sample.cycles = 1234567; sample.count = 2;
+        sample.events[0] = 0x68; sample.events[1] = 0x03;
+        sample.values[0] = 2400000; sample.values[1] = 500;
+        void *ring = vita_trace_shared_pmu_ring(mem.data(), cpu);
+        REQUIRE(vita_trace_ring_try_push(ring, &sample) == 1);
+        CHECK(vita_trace_ring_pending(vita_trace_shared_core_ring(mem.data(), cpu)) == 0);
+        VitaTracePmuSample out{};
+        REQUIRE(vita_trace_ring_try_pop(ring, &out) == 1);
+        CHECK(std::memcmp(&sample, &out, sizeof(sample)) == 0);
+    }
+}
+
+TEST_CASE("PMU offsets are checked as part of the shared layout") {
+    auto mem = make_shared_block();
+    REQUIRE(vita_trace_shared_validate_layout(mem.data(), mem.size()) == 1);
+    auto *header = (VitaTraceSharedHeader *)mem.data();
+    header->pmu_ring_offset[3] = header->pmu_ring_offset[0];
+    CHECK(vita_trace_shared_validate_layout(mem.data(), mem.size()) == 0);
 }

@@ -27,6 +27,8 @@ size_t vita_trace_shared_layout_size(uint32_t sample_capacity, uint32_t control_
     offset += sample_ring * VITA_TRACE_CORE_COUNT;
     offset += (control_bytes + VITA_TRACE_SHARED_ALIGN - 1u) &
                ~(uint64_t)(VITA_TRACE_SHARED_ALIGN - 1u);
+    offset += (uint64_t)align_up(vita_trace_ring_layout_size(VITA_TRACE_PMU_RING_CAPACITY,
+                                                           sizeof(VitaTracePmuSample))) * VITA_TRACE_CORE_COUNT;
     return offset <= UINT32_MAX ? (size_t)offset : 0;
 }
 
@@ -69,6 +71,14 @@ int vita_trace_shared_init(void *mem, size_t mem_size, uint32_t target_pid, uint
         return 0;
     }
     hdr->control_ring_offset = (uint32_t)offset;
+    offset += align_up(vita_trace_ring_layout_size(control_capacity, sizeof(VitaTraceControlRecord)));
+    for (uint32_t cpu = 0; cpu < VITA_TRACE_CORE_COUNT; ++cpu) {
+        if (!vita_trace_ring_init((uint8_t *)mem + offset, mem_size - offset,
+                                 VITA_TRACE_PMU_RING_CAPACITY, sizeof(VitaTracePmuSample))) return 0;
+        hdr->pmu_ring_offset[cpu] = (uint32_t)offset;
+        offset += align_up(vita_trace_ring_layout_size(VITA_TRACE_PMU_RING_CAPACITY,
+                                                      sizeof(VitaTracePmuSample)));
+    }
 
     /* Published last so a consumer never sees the magic before the rings
      * behind it are initialized. */
@@ -93,11 +103,15 @@ int vita_trace_shared_validate_layout(const void *mem, size_t size) {
     const size_t required = vita_trace_shared_layout_size(hdr->sample_capacity, hdr->control_capacity);
     if (!required || required > size || hdr->core_count != VITA_TRACE_CORE_COUNT) return 0;
     size_t offset = align_up(sizeof(VitaTraceSharedHeader));
-    for (uint32_t i = 0; i <= VITA_TRACE_CORE_COUNT; ++i) {
+    for (uint32_t i = 0; i < 2u * VITA_TRACE_CORE_COUNT + 1u; ++i) {
         const int sample = i < VITA_TRACE_CORE_COUNT;
-        const uint32_t declared = sample ? hdr->core_ring_offset[i] : hdr->control_ring_offset;
-        const uint32_t capacity = sample ? hdr->sample_capacity : hdr->control_capacity;
-        const uint32_t element = sample ? sizeof(VitaTraceSample) : sizeof(VitaTraceControlRecord);
+        const int pmu = i > VITA_TRACE_CORE_COUNT;
+        const uint32_t declared = sample ? hdr->core_ring_offset[i] :
+            pmu ? hdr->pmu_ring_offset[i - VITA_TRACE_CORE_COUNT - 1u] : hdr->control_ring_offset;
+        const uint32_t capacity = sample ? hdr->sample_capacity :
+            pmu ? VITA_TRACE_PMU_RING_CAPACITY : hdr->control_capacity;
+        const uint32_t element = sample ? sizeof(VitaTraceSample) :
+            pmu ? sizeof(VitaTracePmuSample) : sizeof(VitaTraceControlRecord);
         if (declared != offset) return 0;
         const VitaTraceRingHeader *ring = (const VitaTraceRingHeader *)((const uint8_t *)mem + offset);
         if (ring->magic != VITA_TRACE_RING_MAGIC || ring->capacity != capacity ||
@@ -137,4 +151,10 @@ void *vita_trace_shared_control_ring(void *mem) {
     }
     VitaTraceSharedHeader *hdr = (VitaTraceSharedHeader *)mem;
     return (uint8_t *)mem + hdr->control_ring_offset;
+}
+
+void *vita_trace_shared_pmu_ring(void *mem, uint32_t cpu) {
+    if (!vita_trace_shared_is_valid(mem) || cpu >= VITA_TRACE_CORE_COUNT) return NULL;
+    VitaTraceSharedHeader *hdr = (VitaTraceSharedHeader *)mem;
+    return (uint8_t *)mem + hdr->pmu_ring_offset[cpu];
 }

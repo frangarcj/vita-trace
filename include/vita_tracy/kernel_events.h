@@ -3,6 +3,7 @@
 #include <stdint.h>
 
 #include "vita_tracy/config.h"
+#include "vita_tracy/pmu_core.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -63,6 +64,20 @@ typedef struct VitaTracePmuEvent {
     uint32_t event_code;
     uint32_t value;
 } VitaTracePmuEvent;
+
+/* Whole-core deltas. There is deliberately no pid/tid: scheduler activity,
+ * including the profiler and other processes, contributes to these counts. */
+typedef struct VitaTracePmuSample {
+    uint64_t timestamp;
+    uint32_t elapsed_us;
+    uint32_t sequence;
+    uint32_t cpu;
+    uint32_t flags; /* VITA_PMU_DELTA_GAP means deltas must not be plotted. */
+    uint32_t count;
+    uint32_t cycles;
+    uint32_t events[VITA_PMU_EVENTS];
+    uint32_t values[VITA_PMU_EVENTS];
+} VitaTracePmuSample;
 
 typedef struct VitaTraceClockSyncEvent {
     uint64_t kernel_tick;
