@@ -86,6 +86,28 @@ target_link_libraries(vita_tracy_lifetime_tests PRIVATE doctest::doctest)
 target_compile_features(vita_tracy_lifetime_tests PRIVATE cxx_std_17)
 doctest_discover_tests(vita_tracy_lifetime_tests)
 
+foreach(_mode IN ITEMS 0 1)
+    add_executable(vita_tracy_autostart_${_mode}_tests
+        main.cpp autostart_test.cpp
+        ${VITA_TRACY_SOURCE_DIR}/client/tracy_vita_autostart.c
+    )
+    target_include_directories(vita_tracy_autostart_${_mode}_tests PRIVATE ${VITA_TRACY_SOURCE_DIR}/include)
+    target_compile_definitions(vita_tracy_autostart_${_mode}_tests PRIVATE VITA_TRACY_AUTO_PMU=${_mode})
+    target_link_libraries(vita_tracy_autostart_${_mode}_tests PRIVATE doctest::doctest)
+    target_compile_features(vita_tracy_autostart_${_mode}_tests PRIVATE cxx_std_17)
+    doctest_discover_tests(vita_tracy_autostart_${_mode}_tests TEST_PREFIX "bootstrap.${_mode}.")
+endforeach()
+
+add_executable(vita_tracy_autoframe_tests
+    main.cpp autoframe_test.cpp
+    ${VITA_TRACY_SOURCE_DIR}/client/tracy_vita_autoemit.cpp
+)
+target_include_directories(vita_tracy_autoframe_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/fakes)
+target_compile_definitions(vita_tracy_autoframe_tests PRIVATE VITA_TRACY_AUTO_FRAMES=1)
+target_link_libraries(vita_tracy_autoframe_tests PRIVATE doctest::doctest)
+target_compile_features(vita_tracy_autoframe_tests PRIVATE cxx_std_17)
+doctest_discover_tests(vita_tracy_autoframe_tests)
+
 # The offline symbolication tool is host-side Python; its tests run in the
 # same suite so a change there fails the build like any other.
 find_package(Python3 COMPONENTS Interpreter)
