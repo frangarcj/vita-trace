@@ -86,6 +86,10 @@ disabled. There is no resident PMU polling thread or diagnostic busy loop.
 Defaults are app cores 0..2 at 100 Hz, cycle-only unless events are configured;
 the automatic CMake mode explicitly configures six events. CPU 3 is opt-in.
 The IRQ checks its actual core before touching CP15 or its SPSC ring.
+An incorrectly routed callback disables that reader, clears its active bit
+and reports `VITA_TRACY_ERROR_CPU`. It does not touch the wrong core's bank,
+silently recover on a later tick, or stop the other healthy readers. Stop
+and restart explicitly once the routing problem has been diagnosed.
 
 The PMU must be unused (counter and interrupt enables clear) before acquisition.
 The backend saves disabled counter values/types, selector and control state,

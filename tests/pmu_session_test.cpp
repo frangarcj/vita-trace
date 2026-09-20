@@ -202,6 +202,35 @@ TEST_CASE_FIXTURE(Fixture, "PMU wrong-core callbacks do not read counters or cor
     tick(1, 0);
     CHECK(fake.reads == reads); CHECK(state.stats.pmu_wrong_cpu[1] == 1);
     CHECK(vita_trace_ring_pending(vita_trace_shared_pmu_ring(memory.data(), 1)) == 0);
+    CHECK(state.stats.pmu_active_mask == 5);
+    CHECK(state.stats.pmu_last_error == VITA_TRACY_ERROR_CPU);
+    CHECK(fake.notifications == 1);
+    CHECK(vita_tracy_pmu_sample_start(&state) == VITA_TRACY_ERROR_STATE);
+    tick(1); // A later correctly routed tick must not silently recover a failed reader.
+    CHECK(fake.reads == reads);
+    CHECK(fake.notifications == 1);
+}
+TEST_CASE_FIXTURE(Fixture, "PMU routing failure does not stop healthy cores and can be explicitly restarted") {
+    REQUIRE(vita_tracy_pmu_sample_start(&state) == 0);
+    tick(0, 1);
+    tick(1);
+    fake.now += 10000;
+    fake.banks[1].cycles += 321;
+    tick(1);
+    VitaTracePmuSample sample{};
+    REQUIRE(vita_trace_ring_try_pop(vita_trace_shared_pmu_ring(memory.data(), 1), &sample));
+    CHECK(sample.cycles == 321);
+    REQUIRE(vita_tracy_pmu_sample_stop(&state) == 0);
+    for (const auto &bank : fake.banks) CHECK(bank.enable == 0);
+    REQUIRE(vita_tracy_pmu_sample_start(&state) == 0);
+    CHECK(state.stats.pmu_active_mask == 7);
+    CHECK(state.stats.pmu_last_error == 0);
+    tick(0);
+    fake.now += 10000;
+    fake.banks[0].cycles += 123;
+    tick(0);
+    REQUIRE(vita_trace_ring_try_pop(vita_trace_shared_pmu_ring(memory.data(), 0), &sample));
+    CHECK(sample.cycles == 123);
 }
 TEST_CASE_FIXTURE(Fixture, "PMU counter ownership changes stop that core instead of producing nonsense") {
     REQUIRE(vita_tracy_pmu_sample_start(&state) == 0);

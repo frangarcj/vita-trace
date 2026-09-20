@@ -53,6 +53,13 @@ static void record_error(VitaTracyKernelState *st, int error) {
     __atomic_store_n(&st->stats.pmu_last_error, error, __ATOMIC_RELEASE);
 }
 
+static void fail_reader(PmuCpu *cpu, int error) {
+    cpu->failed = 1;
+    __atomic_fetch_and(&cpu->state->stats.pmu_active_mask, ~(1u << cpu->cpu), __ATOMIC_RELEASE);
+    record_error(cpu->state, error);
+    vita_tracy_notify(cpu->state);
+}
+
 /* The timer owns this core's only PMU producer. No user-memory lookup, thread
  * enumeration, allocation, syscalls to the client or blocking locks here. */
 static void on_pmu_tick(void *context) {
@@ -62,6 +69,7 @@ static void on_pmu_tick(void *context) {
         vita_trace_control_pending(&st->control)) return;
     if ((uint32_t)ksceKernelCpuId() != cpu->cpu) {
         __atomic_fetch_add(&st->stats.pmu_wrong_cpu[cpu->cpu], 1u, __ATOMIC_RELAXED);
+        fail_reader(cpu, VITA_TRACY_ERROR_CPU);
         return; // Never read another core's banked counters or write its SPSC ring.
     }
     SceKernelIntrStatus intr = ksceKernelCpuSuspendIntr();
@@ -69,11 +77,8 @@ static void on_pmu_tick(void *context) {
     int ret = vita_pmu_read(&cpu->counters, vita_tracy_pmu_io(), vita_tracy_kernel_now(), &delta);
     ksceKernelCpuResumeIntr(intr);
     if (ret < 0) {
-        cpu->failed = 1;
-        __atomic_fetch_and(&st->stats.pmu_active_mask, ~(1u << cpu->cpu), __ATOMIC_RELEASE);
         __atomic_fetch_add(&st->stats.pmu_counter_errors[cpu->cpu], 1u, __ATOMIC_RELAXED);
-        record_error(st, ret);
-        vita_tracy_notify(st);
+        fail_reader(cpu, ret);
         return;
     }
     if (!ret) return; // First callback establishes an actual baseline.
