@@ -70,6 +70,7 @@ static void on_pmu_tick(void *context) {
     ksceKernelCpuResumeIntr(intr);
     if (ret < 0) {
         cpu->failed = 1;
+        __atomic_fetch_and(&st->stats.pmu_active_mask, ~(1u << cpu->cpu), __ATOMIC_RELEASE);
         __atomic_fetch_add(&st->stats.pmu_counter_errors[cpu->cpu], 1u, __ATOMIC_RELAXED);
         record_error(st, ret);
         vita_tracy_notify(st);
@@ -210,7 +211,12 @@ int vita_tracy_pmu_sample_stop(VitaTracyKernelState *st) {
 int vita_tracy_pmu_sample_start(VitaTracyKernelState *st) {
     initialize();
     if (!st->shared) return VITA_TRACY_ERROR_STATE;
-    if (__atomic_load_n(&g_recording, __ATOMIC_ACQUIRE)) return VITA_TRACY_OK;
+    if (__atomic_load_n(&g_recording, __ATOMIC_ACQUIRE)) {
+        /* A failed core retains resources for stop/retry, but is not a healthy
+         * running session. Do not report a successful idempotent start. */
+        return __atomic_load_n(&st->stats.pmu_active_mask, __ATOMIC_ACQUIRE) == g_core_mask ?
+            VITA_TRACY_OK : VITA_TRACY_ERROR_STATE;
+    }
     if (has_resources()) return VITA_TRACY_ERROR_BUSY;
     if (g_configured_pid != st->target_pid) {
         memset(&g_plan, 0, sizeof(g_plan));

@@ -22,7 +22,7 @@ struct Job { SceKernelThreadEntry entry; uint32_t core; bool started = false; };
 struct Fake {
     int core = 0, next_job = 20, notifications = 0, reads = 0;
     int fail_prepare = -1, fail_arm = -1, fail_start = -1, fail_join = -1, wrong_job = -1;
-    int busy_timer = -1;
+    int busy_timer = -1, fail_delete = -1;
     uint64_t now = 10000;
     std::array<Bank, 4> banks;
     std::array<VitaTracyTickSource *,4> timers{};
@@ -72,13 +72,14 @@ struct Fixture {
         memory.resize(vita_trace_shared_layout_size(16, 16));
         REQUIRE(vita_trace_shared_init(memory.data(), memory.size(), 123, 1000000, 16, 16) == 1);
         state.shared = memory.data(); state.target_pid = 123;
+        vita_trace_control_set_target(&state.control, 123);
         config.core_mask = 7; config.frequency_hz = 100;
         config.counter_count = 2;
         config.counters[0] = {0, 0x68}; config.counters[1] = {3, 0x03};
         REQUIRE(vita_tracy_pmu_configure(&state, &config) == 0);
     }
     ~Fixture() {
-        fake.busy_timer = fake.fail_join = fake.fail_start = fake.wrong_job = -1;
+        fake.busy_timer = fake.fail_join = fake.fail_start = fake.wrong_job = fake.fail_delete = -1;
         CHECK(vita_tracy_pmu_sample_stop(&state) == 0);
         CHECK(fake.jobs.empty());
     }
@@ -117,7 +118,10 @@ int ksceKernelWaitThreadEnd(SceUID id, int *, SceUInt *) {
     CHECK(job.started); // A failed StartThread must not be joined as a running worker.
     return (int)job.core == fake.fail_join ? -102 : 0;
 }
-int ksceKernelDeleteThread(SceUID id) { REQUIRE(fake.jobs.erase(id) == 1); return 0; }
+int ksceKernelDeleteThread(SceUID id) {
+    if ((int)fake.jobs.at(id).core == fake.fail_delete) return -105;
+    REQUIRE(fake.jobs.erase(id) == 1); return 0;
+}
 void vita_tracy_tick_init(VitaTracyTickSource *s) { *s = {}; s->timer = s->event = -1; }
 int vita_tracy_tick_prepare(VitaTracyTickSource *s, uint32_t hz, uint32_t mask,
                             VitaTracyTickCallback callback, void *context) {
@@ -204,6 +208,8 @@ TEST_CASE_FIXTURE(Fixture, "PMU counter ownership changes stop that core instead
     fake.banks[0].types[0] = 0x60;
     tick(0);
     CHECK(state.stats.pmu_counter_errors[0] == 1);
+    CHECK(state.stats.pmu_active_mask == 6);
+    CHECK(vita_tracy_pmu_sample_start(&state) == VITA_TRACY_ERROR_STATE);
     int reads = fake.reads; tick(0); CHECK(fake.reads == reads);
     REQUIRE(vita_tracy_pmu_sample_stop(&state) == 0);
     CHECK(fake.banks[0].types[0] == 0x60); CHECK(fake.banks[0].enable != 0);
@@ -220,4 +226,63 @@ TEST_CASE_FIXTURE(Fixture, "PMU failed thread start rolls back without joining a
     CHECK(vita_tracy_pmu_sample_start(&state) == -101);
     CHECK(fake.jobs.empty());
     CHECK(fake.banks[0].enable == 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "PMU preparation failure releases preceding cores and timers") {
+    fake.fail_prepare = 1;
+    CHECK(vita_tracy_pmu_sample_start(&state) == -103);
+    CHECK(fake.jobs.empty());
+    for (auto *timer : fake.timers) CHECK(timer == nullptr);
+    for (const auto &bank : fake.banks) CHECK(bank.enable == 0);
+}
+TEST_CASE_FIXTURE(Fixture, "PMU failed helper join retains its bank and handle until retry") {
+    fake.fail_join = 1;
+    CHECK(vita_tracy_pmu_sample_start(&state) == -102);
+    CHECK_FALSE(fake.jobs.empty()); CHECK(fake.banks[1].enable != 0);
+    CHECK(vita_tracy_pmu_sample_start(&state) == VITA_TRACY_ERROR_BUSY);
+    fake.fail_join = -1;
+    REQUIRE(vita_tracy_pmu_sample_stop(&state) == 0);
+    CHECK(fake.jobs.empty());
+    for (const auto &bank : fake.banks) CHECK(bank.enable == 0);
+}
+TEST_CASE_FIXTURE(Fixture, "PMU failed helper deletion is recoverable without losing its resource handle") {
+    fake.fail_delete = 1;
+    CHECK(vita_tracy_pmu_sample_start(&state) == -105);
+    CHECK_FALSE(fake.jobs.empty());
+    fake.fail_delete = -1;
+    REQUIRE(vita_tracy_pmu_sample_stop(&state) == 0);
+    CHECK(fake.jobs.empty());
+    for (const auto &bank : fake.banks) CHECK(bank.enable == 0);
+}
+TEST_CASE_FIXTURE(Fixture, "PMU setup on the wrong core cannot program the wrong register bank") {
+    fake.wrong_job = 1;
+    CHECK(vita_tracy_pmu_sample_start(&state) == VITA_TRACY_ERROR_STATE);
+    CHECK(fake.jobs.empty());
+    for (const auto &bank : fake.banks) { CHECK(bank.enable == 0); CHECK(bank.cycles == 200); }
+}
+TEST_CASE_FIXTURE(Fixture, "PMU stops touching counters as soon as target cleanup is requested") {
+    REQUIRE(vita_tracy_pmu_sample_start(&state) == 0);
+    REQUIRE(vita_trace_control_request(&state.control, 123));
+    const int before = fake.reads;
+    for (unsigned cpu = 0; cpu < 3; ++cpu) tick(cpu);
+    CHECK(fake.reads == before); CHECK(fake.notifications == 0);
+    for (unsigned cpu = 0; cpu < 3; ++cpu) CHECK(state.stats.pmu_records[cpu] == 0);
+}
+TEST_CASE_FIXTURE(Fixture, "PMU ring overflow drops rather than overwriting and leaves a sequence gap") {
+    REQUIRE(vita_tracy_pmu_sample_start(&state) == 0);
+    tick(0);
+    for (unsigned i = 0; i < VITA_TRACE_PMU_RING_CAPACITY + 2; ++i) {
+        fake.now += 10000; fake.banks[0].cycles += 100; tick(0);
+    }
+    CHECK(state.stats.pmu_records[0] == VITA_TRACE_PMU_RING_CAPACITY);
+    CHECK(state.stats.pmu_dropped[0] == 2);
+    void *ring = vita_trace_shared_pmu_ring(memory.data(), 0);
+    VitaTracePmuSample sample{};
+    for (unsigned i = 1; i <= VITA_TRACE_PMU_RING_CAPACITY; ++i) {
+        REQUIRE(vita_trace_ring_try_pop(ring, &sample)); CHECK(sample.sequence == i);
+    }
+    fake.now += 10000; fake.banks[0].cycles += 100; tick(0);
+    REQUIRE(vita_trace_ring_try_pop(ring, &sample));
+    CHECK(sample.sequence == VITA_TRACE_PMU_RING_CAPACITY + 3);
+    CHECK(sample.cycles == 100); CHECK(sample.elapsed_us == 10000);
 }
