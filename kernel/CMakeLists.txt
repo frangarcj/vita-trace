@@ -29,6 +29,14 @@ target_compile_options(tracy_kernel PRIVATE
     -mgeneral-regs-only -fno-tree-vectorize -fno-tree-slp-vectorize
 )
 
+# Start hardware bring-up on one CPU without editing the backend or its ABI.
+set(VITA_TRACY_IRQ_CORE_MASK "7" CACHE STRING "PC sampler app-core mask (decimal 1..7)")
+if(NOT VITA_TRACY_IRQ_CORE_MASK MATCHES "^[1-7]$")
+    message(FATAL_ERROR "VITA_TRACY_IRQ_CORE_MASK must be a decimal mask from 1 to 7")
+endif()
+target_compile_definitions(tracy_kernel PRIVATE
+    VITA_TRACY_IRQ_CORE_MASK=${VITA_TRACY_IRQ_CORE_MASK})
+
 # Module enumeration lives in SceModulemgrForKernel, whose NIDs differ
 # between firmware branches, so the stub is selected explicitly rather than
 # assumed. 3.60 uses the unsuffixed stub; 3.63 and later use the _363 one.

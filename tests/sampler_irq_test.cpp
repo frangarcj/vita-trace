@@ -4,6 +4,10 @@
 #include <map>
 #include <vector>
 
+#ifndef VITA_TRACY_IRQ_CORE_MASK
+#define VITA_TRACY_IRQ_CORE_MASK 7u
+#endif
+
 #include <psp2kern/kernel/cpu.h>
 #include <psp2kern/kernel/excpmgr.h>
 #include <psp2kern/kernel/threadmgr.h>
@@ -424,4 +428,20 @@ TEST_CASE_FIXTURE(Fixture, "IRQ failed helper deletion remains retryable") {
     REQUIRE(vita_tracy_sampler_irq_stop(&state) == 0);
     CHECK(fake.jobs.empty());
     CHECK(fake.banks[0].cycles == 200);
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ sampler honors the build-selected app-core mask") {
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    CHECK(state.stats.sample_irq_core_mask == VITA_TRACY_IRQ_CORE_MASK);
+    for (unsigned cpu = 0; cpu < 4; ++cpu) {
+        const bool selected = (VITA_TRACY_IRQ_CORE_MASK & (1u << cpu)) != 0;
+        CHECK(fake.banks[cpu].enable == (selected ? VITA_PMU_CYCLE_BIT : 0u));
+        CHECK(fake.banks[cpu].interrupts == (selected ? VITA_PMU_CYCLE_BIT : 0u));
+        CHECK(fake.starts[cpu] == (selected ? 2u : 0u));
+        SceExcpmgrExceptionContext context{};
+        context.SPSR = 0x10u;
+        context.address_of_faulting_instruction = 0x81234000u;
+        overflow(cpu, context);
+        CHECK(state.stats.samples_emitted[cpu] == (selected ? 1u : 0u));
+    }
 }

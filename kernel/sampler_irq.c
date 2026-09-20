@@ -9,7 +9,12 @@
 #include "vita_tracy/kernel_abi.h"
 #include "vita_tracy/pmu_overflow.h"
 
+#ifndef VITA_TRACY_IRQ_CORE_MASK
 #define VITA_TRACY_IRQ_CORE_MASK 7u
+#endif
+#if VITA_TRACY_IRQ_CORE_MASK == 0 || (VITA_TRACY_IRQ_CORE_MASK & ~7u)
+#error "IRQ sampling must select at least one app core (bits 0..2)"
+#endif
 #define VITA_TRACY_IRQ_HANDLER_PRIORITY 7
 #define IRQ_ADMISSION_OPEN 0x80000000u
 #define IRQ_ADMISSION_ACTIVE 1u
