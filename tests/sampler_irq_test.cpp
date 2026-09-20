@@ -51,6 +51,10 @@ struct Fake {
     VitaTracyKernelState *stop_in_context = nullptr;
     int stop_result = 0;
     bool nested_context = false;
+    int fail_join_core = -1;
+    int fail_delete_core = -1;
+    int fail_arm_core = -1;
+    unsigned starts[4]{};
     uint64_t now = 10000;
     void *registered_handler = nullptr;
     SceKernelThreadContextInfo thread{123, 0x500};
@@ -108,6 +112,7 @@ struct Fixture {
     }
 
     ~Fixture() {
+        fake.fail_join_core = fake.fail_delete_core = fake.fail_arm_core = -1;
         CHECK(vita_tracy_sampler_irq_stop(&state) == 0);
         CHECK(fake.jobs.empty());
     }
@@ -174,6 +179,8 @@ SceUID ksceKernelCreateThread(const char *, SceKernelThreadEntry entry, int, Sce
 
 int ksceKernelStartThread(SceUID id, SceSize size, void *arg) {
     Job &job = fake.jobs.at(id);
+    if (++fake.starts[job.core] == 2 && static_cast<int>(job.core) == fake.fail_arm_core)
+        return -91;
     fake.core = static_cast<int>(job.core);
     job.started = true;
     job.entry(size, arg);
@@ -183,10 +190,12 @@ int ksceKernelStartThread(SceUID id, SceSize size, void *arg) {
 
 int ksceKernelWaitThreadEnd(SceUID id, int *, SceUInt *) {
     CHECK(fake.jobs.at(id).started);
+    if (static_cast<int>(fake.jobs.at(id).core) == fake.fail_join_core) return -92;
     return 0;
 }
 
 int ksceKernelDeleteThread(SceUID id) {
+    if (static_cast<int>(fake.jobs.at(id).core) == fake.fail_delete_core) return -93;
     REQUIRE(fake.jobs.erase(id) == 1);
     return 0;
 }
@@ -376,4 +385,43 @@ TEST_CASE_FIXTURE(Fixture, "nested IRQ callbacks cannot become two producers for
     overflow(1, context);
     CHECK(state.stats.samples_emitted[1] == 2);
     CHECK(fake.handler_registrations == 1);
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ failed preparation join retains the helper until cleanup succeeds") {
+    fake.fail_join_core = 1;
+    CHECK(vita_tracy_sampler_irq_start(&state) == -92);
+    CHECK_FALSE(fake.jobs.empty());
+    CHECK_FALSE(vita_tracy_sampler_irq_handler_registered());
+    CHECK(vita_tracy_sampler_irq_start(&state) == VITA_TRACY_ERROR_BUSY);
+    CHECK(vita_tracy_sampler_irq_stop(&state) == -92);
+    fake.fail_join_core = -1;
+    REQUIRE(vita_tracy_sampler_irq_stop(&state) == 0);
+    CHECK(fake.jobs.empty());
+    for (const auto &bank : fake.banks) {
+        CHECK(bank.cycles == 200);
+        CHECK(bank.enable == 0);
+        CHECK(bank.interrupts == 0);
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ partial arm failure disarms earlier cores without joining an unstarted job") {
+    fake.fail_arm_core = 1;
+    CHECK(vita_tracy_sampler_irq_start(&state) == -91);
+    CHECK(vita_tracy_sampler_irq_handler_registered());
+    CHECK(fake.jobs.empty());
+    for (const auto &bank : fake.banks) {
+        CHECK(bank.cycles == 200);
+        CHECK(bank.enable == 0);
+        CHECK(bank.interrupts == 0);
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ failed helper deletion remains retryable") {
+    fake.fail_delete_core = 0;
+    CHECK(vita_tracy_sampler_irq_start(&state) == -93);
+    CHECK_FALSE(fake.jobs.empty());
+    fake.fail_delete_core = -1;
+    REQUIRE(vita_tracy_sampler_irq_stop(&state) == 0);
+    CHECK(fake.jobs.empty());
+    CHECK(fake.banks[0].cycles == 200);
 }

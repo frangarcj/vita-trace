@@ -74,6 +74,8 @@ int vita_tracy_proc_events_unregister(VitaTracyKernelState *st);
 
 int vita_tracy_sampler_start(VitaTracyKernelState *st);
 int vita_tracy_sampler_stop(VitaTracyKernelState *st);
+int vita_tracy_sampler_diagnostic_start(VitaTracyKernelState *st);
+int vita_tracy_sampler_diagnostic_stop(VitaTracyKernelState *st);
 int vita_tracy_sampler_irq_start(VitaTracyKernelState *st);
 int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st);
 int vita_tracy_sampler_irq_handler_registered(void);

@@ -346,20 +346,15 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
         return VITA_TRACY_ERROR_STATE;
     }
 
+    /* A failed start can own resources despite leaving the logical state
+     * STOPPED. Drain that backend before accepting stop or reconfiguration. */
+    int stopped = vita_tracy_sampler_stop(st);
+    if (stopped < 0) return stopped;
+    if (st->state == VITA_TRACY_STATE_PROFILING)
+        transition(st, VITA_TRACY_EVENT_STOP);
     if (local.frequency_hz == 0) {
-        if (st->state == VITA_TRACY_STATE_PROFILING) {
-            int ret = vita_tracy_sampler_stop(st);
-            if (ret < 0) return ret;
-            transition(st, VITA_TRACY_EVENT_STOP);
-        }
         st->stats.sampling_flags = 0;
         return VITA_TRACY_OK;
-    }
-
-    if (st->state == VITA_TRACY_STATE_PROFILING) {
-        int ret = vita_tracy_sampler_stop(st);
-        if (ret < 0) return ret;
-        transition(st, VITA_TRACY_EVENT_STOP);
     }
     st->sampling_hz = local.frequency_hz;
     st->sampling_flags = local.flags;

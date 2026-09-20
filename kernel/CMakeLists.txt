@@ -4,6 +4,7 @@ add_executable(tracy_kernel
     pmu_session.c
     pmu_arm.c
     process_events.c
+    sampler.c
     sampler_debug_fallback.c
     sampler_irq.c
     sampler_pamgr.c

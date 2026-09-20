@@ -95,6 +95,19 @@ target_compile_definitions(vita_tracy_irq_sampler_tests PRIVATE VITA_TRACY_TESTI
 target_compile_features(vita_tracy_irq_sampler_tests PRIVATE cxx_std_17)
 doctest_discover_tests(vita_tracy_irq_sampler_tests)
 
+add_executable(vita_tracy_sampler_dispatch_tests
+    main.cpp sampler_dispatch_test.cpp
+    ${VITA_TRACY_SOURCE_DIR}/kernel/sampler.c
+)
+target_include_directories(vita_tracy_sampler_dispatch_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/fakes
+    ${VITA_TRACY_SOURCE_DIR}/include
+    ${VITA_TRACY_SOURCE_DIR}/kernel
+)
+target_link_libraries(vita_tracy_sampler_dispatch_tests PRIVATE doctest::doctest)
+target_compile_features(vita_tracy_sampler_dispatch_tests PRIVATE cxx_std_17)
+doctest_discover_tests(vita_tracy_sampler_dispatch_tests)
+
 add_executable(vita_tracy_lifetime_tests
     main.cpp client_lifetime_test.cpp
     ${VITA_TRACY_SOURCE_DIR}/client/tracy_vita_init.cpp

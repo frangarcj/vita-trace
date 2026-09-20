@@ -113,22 +113,8 @@ static int sampler_thread(SceSize args, void *argp) {
     return 0;
 }
 
-int vita_tracy_sampler_start(VitaTracyKernelState *st) {
+int vita_tracy_sampler_diagnostic_start(VitaTracyKernelState *st) {
     if (st->sampler_thread > 0) {
-        return VITA_TRACY_OK;
-    }
-
-    if (st->sampling_flags & VITA_TRACY_SAMPLING_PMU_IRQ) {
-        int ret = vita_tracy_sampler_irq_start(st);
-        if (ret == VITA_TRACY_OK) st->sampler_backend = VITA_TRACY_SAMPLER_PMU_IRQ;
-        return ret;
-    }
-
-    /* Prefer a source that does not stop the target; the fallback below is
-     * entered only by explicit diagnostic opt-in. */
-    int ret = vita_tracy_sampler_pamgr_start(st);
-    if (ret == VITA_TRACY_OK) {
-        st->sampler_backend = VITA_TRACY_SAMPLER_PAMGR;
         return VITA_TRACY_OK;
     }
 
@@ -141,7 +127,7 @@ int vita_tracy_sampler_start(VitaTracyKernelState *st) {
      * suspend loop. */
     st->control_thread = (SceUID)ksceKernelGetThreadId();
 
-    ret = vita_tracy_tick_start(&st->sample_clock, st->sampling_hz);
+    int ret = vita_tracy_tick_start(&st->sample_clock, st->sampling_hz);
     if (ret < 0) return ret;
 
     SceUID thid = ksceKernelCreateThread("VitaTracySampler", sampler_thread, 0x40, 0x2000, 0, 0, NULL);
@@ -161,26 +147,12 @@ int vita_tracy_sampler_start(VitaTracyKernelState *st) {
         return VITA_TRACY_ERROR_STATE;
     }
 
-    st->sampler_backend = VITA_TRACY_SAMPLER_SUSPEND;
     return VITA_TRACY_OK;
 }
 
-int vita_tracy_sampler_stop(VitaTracyKernelState *st) {
-    if (st->sampler_backend == VITA_TRACY_SAMPLER_PMU_IRQ) {
-        int ret = vita_tracy_sampler_irq_stop(st);
-        if (ret >= 0) st->sampler_backend = VITA_TRACY_SAMPLER_NONE;
-        return ret;
-    }
-    if (st->sampler_backend == VITA_TRACY_SAMPLER_PAMGR) {
-        vita_tracy_sampler_pamgr_stop(st);
-        st->sampler_backend = VITA_TRACY_SAMPLER_NONE;
-        return 0;
-    }
-
+int vita_tracy_sampler_diagnostic_stop(VitaTracyKernelState *st) {
     if (st->sampler_thread <= 0) {
-        int ret = vita_tracy_tick_stop(&st->sample_clock);
-        if (ret >= 0) st->sampler_backend = VITA_TRACY_SAMPLER_NONE;
-        return ret;
+        return vita_tracy_tick_stop(&st->sample_clock);
     }
 
     __atomic_store_n(&st->sampler_should_run, 0, __ATOMIC_RELEASE);
@@ -190,7 +162,5 @@ int vita_tracy_sampler_stop(VitaTracyKernelState *st) {
     ret = ksceKernelDeleteThread(st->sampler_thread);
     if (ret < 0) return ret;
     st->sampler_thread = 0;
-    ret = vita_tracy_tick_stop(&st->sample_clock);
-    if (ret >= 0) st->sampler_backend = VITA_TRACY_SAMPLER_NONE;
-    return ret;
+    return vita_tracy_tick_stop(&st->sample_clock);
 }
