@@ -41,9 +41,13 @@ and prevents module unload until release succeeds.
 `SceSysTimerCallback(timer_id, user_data)` does not receive the interrupted
 register frame, so the diagnostic timer is not reused as a fake PC source.
 The experimental backend instead uses the PMU cycle counter overflow and an
-`SCE_EXCP_IRQ` observer registered through SceExcpmgr. The VitaSDK exception
-context contains PC/SP/LR/SPSR, while `ksceKernelGetThreadContextInfo` is
-explicitly documented for identifying the thread interrupted by an exception.
+priority-zero `SCE_EXCP_IRQ` raw node registered through SceExcpmgr.
+`kernel/irq_entry.S` captures registers into our private `VitaTracyIrqFrame`,
+aligns the stack for C, restores the entry state and always tail-chains to the
+next node at `next + 8`. It does not assume that Sony supplied a C-context
+pointer. `ksceKernelGetThreadContextInfo` is documented for identifying the
+thread interrupted by an exception; its address is resolved before startup.
+The machine-state boundary and kubridge evidence are in `docs/kubridge-review.md`.
 
 `vita_tracy_kernel_set_sampling(hz)` deliberately continues to return
 `VITA_TRACY_ERROR_UNSUPPORTED` for nonzero rates. The unvalidated backend is
@@ -62,6 +66,14 @@ cores are available, then arms them. Existing PMU counter/interrupt owners are
 refused rather than overwritten. A PMU overflow is identified from PMOVSR,
 cleared and reloaded on the same core; unrelated IRQs do not enter Threadmgr.
 Kernel-mode and other-process overflows are serviced but not emitted.
+PMOVSR identifies a pending overflow, not the interrupt-controller source of
+the current entry. An unrelated IRQ could service it if PMUIRQ routing is
+missing/delayed. Samples alone do not validate the requested cadence or prove
+unbiased CPU percentages; verifying the actual interrupt route remains required.
+Unrelated IRQs on a merely prepared (not armed) bank do not fail that reader.
+Once process cleanup is pending, own overflows are serviced without querying
+or publishing target context. A recheck after context lookup also suppresses
+emission when cleanup was requested during that call.
 
 The kernel build defaults to app cores 0..2. For initial hardware validation,
 configure with `-DVITA_TRACY_IRQ_CORE_MASK=1` to select only core 0. Values
@@ -90,12 +102,20 @@ that needs an event-driven kernel resolver later. Resolved profiler workers are
 filtered; resolution failure drops the sample instead of inventing attribution.
 
 This path is **not production-ready until hardware validation**. We still need
-to prove that retail firmware routes Cortex-A9 PMU overflow into this IRQ path,
-that `address_of_faulting_instruction` is the correct interrupted PC for IRQ,
-and that the observer's overhead is acceptable. SceExcpmgr exposes handler
+to prove that retail firmware routes Cortex-A9 PMU overflow into this raw IRQ
+chain, with LR_irq still holding the architecturally defined resume-PC + 4,
+and that the observer's overhead is acceptable. The assembly derives the PC
+from LR_irq, not from a presumed Sony context structure. SceExcpmgr exposes handler
 registration but no public unregister call: after first successful registration
 the plugin intentionally refuses module unload until reboot, even after sampling
 is stopped, so no dangling handler can remain.
+
+Module snapshots preserve segment ordinals even when an earlier segment has
+zero size; the bridge skips empty entries without renumbering them for ELF
+lookup. A returned module count larger than the UID array is rejected before
+reading beyond it. GetModuleInfo does not supply a module NID, so that existing
+capture field remains zero/unknown, not a fabricated module UID or build ID.
+Use exact ELF files and artifact manifests to establish build provenance.
 
 The provisional diagnostic is explicitly opt-in:
 

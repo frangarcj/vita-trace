@@ -132,10 +132,11 @@ The installed VitaSDK declares:
   unregister API. The experimental backend therefore refuses module unload
   after registration rather than guessing at internal list manipulation.
 
-The host implementation uses PMOVSR as the source discriminator and the
-documented exception fields rather than a guessed stack offset. Hardware must
-still establish which saved PC/SP/LR semantics apply specifically to an IRQ,
-that PMUIRQ reaches the observer on each selected core, and that
+The implementation uses PMOVSR as the source discriminator and captures its
+own private frame in `kernel/irq_entry.S`, following the raw-node pattern
+observed in kubridge's abort/undefined handlers. It does not assume a firmware
+C callback frame. Hardware must establish that the priority-zero IRQ entry
+receives raw LR_irq/SPSR, that PMUIRQ reaches it on each selected core, and that
 `ksceKernelGetThreadContextInfo` agrees with a known running thread. The
 backend distinguishes PL0 user mode via SPSR and resolves global TIDs outside
 IRQ context; those assumptions need console evidence before becoming default.
@@ -145,6 +146,17 @@ reads remain unacceptable substitutes. Host tests prove filtering, PMU
 ownership, rollback and transport; they do not prove the firmware's IRQ
 contract. Scheduler events would complement periodic sampling, not replace it
 for a long-running thread.
+
+Optional Unicorn tests execute the compiled entry with ARM and Thumb C targets,
+separate user/IRQ register banks and an unaligned incoming IRQ stack. They check
+restoration and tail-chaining; they do not simulate Sony's GIC dispatcher,
+its private IRQ stack capacity or effects of imported kernel functions.
+The firmware export table has both known 360/363 variants in one binary; test
+startup on both targets rather than treating successful resolution as support.
+Do not treat nonzero sample counts as sufficient PMUIRQ evidence: a pending
+PMOVSR bit can be serviced by a later unrelated IRQ. Establish the actual
+interrupt source and acknowledgement path without stealing the kernel's GIC
+acknowledgement. Compare cadence under different unrelated interrupt loads.
 
 ## Bisect a behavior, not the whole feature set
 
@@ -190,3 +202,26 @@ run; ThreadSanitizer was not run. These tests include fake firmware APIs and
 synthetic exception frames, not real IRQ recordings. Cross-builds produced
 the normal Vita targets and kernel variants for 3.63+ and core 0 only. A mask
 of 8 was rejected at CMake configuration. No new console validation was done.
+
+## kubridge review checkpoint after 194c5f2
+
+| Commit | Change |
+|---|---|
+| `86f321a` | Private raw IRQ frame and explicit ARM save/restore/tail-chain; five compiled-entry tests run on a Cortex-A9 instruction emulator. |
+| `7c6e90c` | An IRQ on a prepared, unarmed PMU no longer fails that core; pending process cleanup suppresses new publications. |
+| `f1e283a` | Four version-sensitive exports resolve via taiHEN at startup, with known 360/363 variants and all-or-nothing publication. |
+| `997b30e` | Sparse segment ordinals, bounded module counts and bounded names survive kernel-to-viewer metadata transport. |
+
+At this checkpoint 209 CTest entries passed both normally and with ASan/UBSan.
+Leak detection was disabled; TSan was not run. Unicorn 2.1.4 was installed in
+an isolated test environment and the five assembly cases were executed, not
+skipped. The former branch-only entry fails those same raw-entry model tests.
+This comparison does not establish what priority-seven firmware dispatch did;
+the new priority-zero IRQ route still requires physical-console validation.
+
+Cross-builds produced all Vita targets and the core-0-only kernel. The legacy
+363 build option was also checked; it now selects the same runtime-resolution
+policy as auto/360, not a distinct fixed-NID binary. The ELF has no versioned
+ForKernel import sections. RWX chain storage remains, and installed import
+stubs also cause the linker's missing GNU-stack-note warning. These warnings
+have not been represented as solved by the entry tests.

@@ -14,7 +14,7 @@ See `docs/sampling.md`, `docs/automatic.md` and `docs/hardware-validation.md`.
 | 0 — Bring-up | **Verified on hardware** | A retail console captured over Wi-Fi: 556 frames, 554 zones in 12 s, timings self-consistent. |
 | 1 — Kernel bridge | Built, ABI-4 hardware validation pending | Explicit profiler PUID registry, event-driven drain/control, separate PMU rings, retryable resource cleanup and serialized control operations. |
 | 2 — Provisional samples | Explicit diagnostic only | SceSysTimer wakes the suspend/read/resume worker. No name-based exclusions; main is no longer the bridge's control caller. These are not unbiased CPU-time samples. |
-| 3 — Non-intrusive sampling | Experimental backend built, hardware validation pending | PMCCNTR overflow drives an IRQ observer registered with SceExcpmgr. The exception context supplies PC/SP/LR/SPSR and `ksceKernelGetThreadContextInfo` supplies PID/global TID. GUID→PUID resolution happens later in the user worker. The public API has no Excpmgr unregister operation, so first use intentionally pins the plugin resident until reboot. |
+| 3 — Non-intrusive sampling | Experimental backend built, hardware validation pending | PMCCNTR overflow drives a priority-zero raw IRQ node. Our own assembly captures registers and tail-chains; C derives PC from LR_irq minus four. Thread context supplies PID/global TID, resolved to PUID later in the worker. First successful handler registration pins the plugin resident until reboot. See `docs/kubridge-review.md`. |
 | 4 — PMU | Built and host-tested, no new hardware run | `kernel/pmu_session.c` reads cycles/events from per-core system-timer callbacks. Short pinned jobs acquire/restore registers; no resident polling thread or PMUSERENR writes. Timestamped whole-core deltas reach Tracy. |
 | 5 — Callstacks | Phase A only | Both diagnostic and IRQ records carry PC/SP/LR, but Tracy currently receives only one PC. Stack snapshots and offline unwinding are not implemented. |
 | 6 — GPU / Razor | Not started | — |
@@ -34,6 +34,12 @@ tracked per core; stop retains shared state while a callback is in flight.
 Backend cleanup remains reachable even after a failed start has left the
 logical sampling state STOPPED. Host tests cover these cases and an alternate
 kernel build selecting only core 0.
+
+The kubridge comparison exposed the missing raw exception-entry contract in
+the old branch-only stub. Five instruction-level ARM/Thumb tests now execute
+the replacement entry, in addition to the C-level tests. Four firmware-sensitive
+exports are resolved via taiHEN before startup; IRQ paths never perform lookups.
+Sparse module segment ordinals are preserved for symbolication.
 
 ## Decisions that departed from the design
 
@@ -91,8 +97,8 @@ an error instead of silently choosing a zero clock reference.
   survives helper-thread exit/context switches, and its actual overhead.
 - What high-resolution clock is reachable without ScePerf. The process timer
   works but is microseconds; the kernel plugin is the likely answer.
-- Hardware proof that PMU overflow reaches the expected core's IRQ path, that
-  Excpmgr's saved instruction address has the expected IRQ semantics, and that
+- Hardware proof that PMU overflow reaches the expected core's raw IRQ chain,
+  with the expected banked LR/SPSR and stack state on entry, and that
   the observer coexists with normal interrupt load at useful rates. A scheduler
   hook alone would not sample a long-running thread between context switches.
   See `docs/sampling.md` for the acceptance gates.

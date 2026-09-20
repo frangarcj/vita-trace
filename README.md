@@ -48,7 +48,11 @@ ctest --test-dir build-host
 ```
 
 Configure applies `patches/tracy/` to the submodule; re-running is
-harmless. For firmware 3.63 and later, add `-DVITA_TRACY_FIRMWARE=363`.
+harmless. The kernel requires taiHEN ModuleUtils and resolves its known 3.60
+and 3.63+ exports at startup; no per-firmware build is needed for those lookups.
+See [firmware compatibility](docs/firmware_compat.md). This is not a claim of
+hardware validation. The raw IRQ entry also has optional instruction-level
+tests using Unicorn; see [the kubridge review](docs/kubridge-review.md).
 
 ## Using it
 

@@ -81,6 +81,19 @@ configuration persistence, latency and overhead. kubridge demonstrates abort
 and undefined handling, not these IRQ-specific facts. Do not describe this
 backend as hardware-validated or remove its explicit experimental opt-in.
 
+PMOVSR says that the counter overflowed, not which interrupt caused the current
+entry. If PMUIRQ is not routed, a later unrelated IRQ could still observe that
+pending bit and produce a sample. Receiving samples alone is therefore not proof
+of periodic PMU interrupt delivery or unbiased CPU percentages. Validate the
+actual firmware IRQ source/acknowledgement path before making that claim; the
+profiler must not read GICC_IAR speculatively and steal Sony's acknowledgement.
+
+The runtime export resolver derived from this review is documented separately
+in `firmware_compat.md`. It resolves the exact known library/function pairs for
+the four versioned operations before callback publication, and refuses missing
+or null entries. No new kubridge runtime dependency is introduced; the lookup
+provider is taiHEN ModuleUtils, also used by kubridge.
+
 The writable chain header still shares an executable section, so the ELF linker
 reports RWX. This change does not claim to solve that mapping constraint. Use a
 recoverable setup and start with one core and a low rate before expanding.
