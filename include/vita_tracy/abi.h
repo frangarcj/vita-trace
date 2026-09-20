@@ -44,6 +44,8 @@ typedef struct VitaTracyPmuConfig {
     uint32_t abi_version;
     uint32_t target_tid;
     uint32_t counter_count;
+    uint32_t core_mask;    /* raw bits 0..3; zero defaults to app cores 0..2 */
+    uint32_t frequency_hz; /* zero defaults to 100 Hz; otherwise 10..1000 */
     VitaTracyPmuCounterConfig counters[VITA_TRACY_PMU_MAX_COUNTERS];
 } VitaTracyPmuConfig;
 
@@ -55,26 +57,25 @@ typedef struct VitaTracyStats {
     uint32_t control_dropped;
     uint32_t uptime_ms;
 
-    /* Kernel-owned PMU cycle-count sampling (vitaTracyPmuSampleStart/Stop):
-     * a dedicated kernel thread, pinned to one core, reads PMCCNTR at PL1
-     * and accumulates deltas here -- userland never touches CP15 PMU
-     * registers directly, sidestepping the PMUSERENR-visibility puzzle in
-     * kernel/pmu.c's file comment (PL1 doesn't need PMUSERENR at all). */
+    /* Legacy low-32-bit totals across selected cores. Use PMU records with
+     * their actual elapsed_us for rates, never ticks * a nominal period. */
     uint32_t pmu_cycle_delta_total;
     uint32_t pmu_sample_ticks;
 
-    /* One-shot: PMCCNTR delta over a fixed busy loop with no sleep in
-     * between, measured entirely in kernel context right as the sampler
-     * starts -- isolates "does the counter advance during active
-     * execution" from "does it advance across mostly-idle wall-clock
-     * time", which pmu_cycle_delta_total alone cannot distinguish. */
-    uint32_t pmu_busy_loop_cycles;
+    uint32_t pmu_busy_loop_cycles; /* Reserved, zero. No diagnostic busy loop. */
     uint32_t sampling_flags;
     uint32_t registry_incomplete_ticks;
     uint32_t sample_read_failures;
     uint32_t sample_resume_failures;
     uint32_t timer_ticks;
     uint32_t diagnostic_batches;
+    uint32_t pmu_active_mask;
+    int32_t pmu_last_error;
+    uint32_t pmu_records[4];
+    uint32_t pmu_dropped[4];
+    uint32_t pmu_gaps[4];
+    uint32_t pmu_wrong_cpu[4];
+    uint32_t pmu_counter_errors[4];
 } VitaTracyStats;
 
 #ifdef __cplusplus

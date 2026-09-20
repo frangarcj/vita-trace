@@ -61,6 +61,9 @@ int vita_tracy_kernel_detach_checked(void);
 
 /* Requests kernel sampling at the given rate. 0 stops sampling. */
 int vita_tracy_kernel_set_sampling(uint32_t frequency_hz);
+/* Select whole-core PMU counters while stopped. Zero mask/rate use cores
+ * 0..2 at 100 Hz. No per-thread attribution or userland CP15 access. */
+int vita_tracy_kernel_configure_pmu(const VitaTracyPmuConfig *config);
 /* Explicit opt-in to intrusive diagnostics; see VITA_TRACY_SAMPLING_* in
  * abi.h. Control runs on the bridge worker, never permanently excluding main. */
 int vita_tracy_kernel_set_sampling_ex(uint32_t frequency_hz, uint32_t flags);

@@ -266,88 +266,24 @@ void LoadKernelPlugin() {
     Report("");
 }
 
-/* PMCCNTR (the dedicated cycle counter) is readable directly once
- * PMUSERENR is set, with no PMSELR indirection -- unlike the six
- * programmable counters. Reading it straight from userland, rather than
- * through any Sce* wrapper, is the whole point here: it proves the
- * kernel's CP15 writes (kernel/pmu.c) actually took effect on the core
- * this thread is running on, independent of ScePerf, which cannot load on
- * this console at all. */
-uint32_t ReadPmccntr() {
-    uint32_t value;
-    __asm__ volatile("mrc p15, 0, %0, c9, c13, 0" : "=r"(value));
-    return value;
-}
-
-/* Reading PMUSERENR itself is unconditionally permitted at PL0 by the ARM
- * architecture regardless of what it currently holds -- it's the register
- * software checks *to decide* whether it has PMU access, so gating the
- * read on itself would make it useless. If sceKernelGetPMUSERENR() is
- * really just this same instruction with no kernel round-trip, both reads
- * should always agree; sceKernelGetPMUSERENR() couldn't legitimately show
- * something this raw read doesn't. */
-uint32_t ReadPmuserenrRaw(void) {
-    uint32_t value;
-    __asm__ volatile("mrc p15, 0, %0, c9, c14, 0" : "=r"(value));
-    return value;
-}
-
-/* Requires the plugin already attached (vitaTracySetPmu rejects any state
- * before that -- see kernel/service.c). Programs only the cycle counter
- * (counter_count = 0): vita_tracy_pmu_configure always enables it
- * unconditionally, so this is the minimal call that still exercises every
- * write in kernel/pmu.c -- PMUSERENR, PMCR, PMCNTENCLR/SET -- across every
- * core in this thread's own affinity mask. */
+/* Configure first, then start below. This never grants userland CP15 access. */
 void CheckKernelPmu() {
-    Report("-- pmu via kernel (CP15) --");
-
-    VitaTracyPmuConfig cfg;
-    memset(&cfg, 0, sizeof(cfg));
+    Report("-- PMU: whole-core timer capture --");
+    VitaTracyPmuConfig cfg{};
     cfg.size = sizeof(cfg);
     cfg.abi_version = VITA_TRACY_ABI_VERSION;
-
-    int ret = vitaTracySetPmu(&cfg);
-    Report("vitaTracySetPmu: %d", ret);
-    if (ret < 0) {
-        Report("");
-        return;
+    cfg.core_mask = 7u;
+    cfg.frequency_hz = 100u;
+    const uint32_t events[] = {0x68u, 0x60u, 0x61u, 0x03u, 0x01u, 0x10u};
+    cfg.counter_count = 6;
+    for (uint32_t i = 0; i < cfg.counter_count; ++i) {
+        cfg.counters[i].counter = i;
+        cfg.counters[i].event_code = events[i];
     }
-
-    /* Confirmed on hardware 2026-08-21: reading PMCCNTR from userland when
-     * this reads 0 genuinely faults (privileged/undefined instruction,
-     * caught pc inside CheckKernelPlugin -- not a branch-to-zero import
-     * miss this time). kernel/pmu.c's own CP15 read-back, immediately
-     * after the mcr write, in the SAME thread that wrote it, does see
-     * PMUSERENR=1 on every one of the 4 per-core threads -- so the
-     * enable genuinely takes on each core while that specific kernel
-     * thread is the one running there, but does not appear to survive
-     * for a DIFFERENT thread (this userland one) to observe afterward.
-     * Still unexplained: docs/reverse_engineering.md's own finding that
-     * context switches never touch CP15 c9 predicts this should persist
-     * per-core regardless of which thread asks. Gating on this check
-     * again after one confirmed crash trying to skip it. */
-    int userenr = sceKernelGetPMUSERENR();
-    uint32_t raw = ReadPmuserenrRaw();
-    Report("sceKernelGetPMUSERENR after kernel enable: 0x%08X", (unsigned)userenr);
-    Report("raw mrc c9,c14,0 on this same thread:       0x%08X", (unsigned)raw);
-    Report("  %s", (unsigned)userenr == raw ? "agree -- Sce's function is just this same read"
-                                             : "DISAGREE -- something between them isn't a raw read");
-    if (userenr == 0) {
-        Report("  still 0 -- see kernel/pmu.c's file comment for what's");
-        Report("  confirmed and what's still open");
-        Report("");
-        return;
-    }
-
-    uint32_t before = ReadPmccntr();
-    volatile uint32_t acc = 0;
-    for (uint32_t i = 0; i < 2000000; ++i) {
-        acc += i * 3u;
-    }
-    uint32_t after = ReadPmccntr();
-    Report("PMCCNTR delta over 2M iterations (raw CP15 read): %u",
-           (unsigned)vita_tracy_pmu_delta(before, after));
-    Report("  a zero or absurd delta means the cycle counter is not really running");
+    int ret = vita_tracy_kernel_configure_pmu(&cfg);
+    Report("configure cores 0..2, 100 Hz, six events: %d", ret);
+    Report("  includes all activity on each core, not just this process");
+    Report("  0x68 means renamed instructions, not retired instructions");
     Report("");
 }
 
@@ -374,15 +310,16 @@ void CheckKernelPlugin() {
 
     CheckKernelPmu();
 
-    /* Kernel-owned PMCCNTR sampling: never touches userland CP15 at all
-     * (see kernel/pmu.c). Started before the same 1s delay the regular
-     * sampler already waits out below, so it accumulates over that same
-     * window -- no extra wall-clock cost to test it. */
+    /* Timers stay enabled for the live viewer after the startup report. */
     int pmu_sample_start = vita_tracy_kernel_pmu_sample_start();
     Report("vitaTracyPmuSampleStart: %d", pmu_sample_start);
 
-    int sampling = vita_tracy_kernel_set_sampling_ex(250, VITA_TRACY_SAMPLING_ALLOW_SUSPEND);
-    Report("suspend diagnostics, timer 250 Hz (not CPU-time sampling): %d", sampling);
+    if (KernelPluginMarkerExists("ux0:data/vita-tracy/allow_suspend")) {
+        int sampling = vita_tracy_kernel_set_sampling_ex(250, VITA_TRACY_SAMPLING_ALLOW_SUSPEND);
+        Report("intrusive suspend diagnostics (not CPU time): %d", sampling);
+    } else {
+        Report("suspend diagnostic disabled; create allow_suspend to opt in");
+    }
 
     sceKernelDelayThread(1000000);
 
@@ -399,25 +336,13 @@ void CheckKernelPlugin() {
         }
         Report("  control dropped: %u", (unsigned)stats.control_dropped);
 
-        Report("  pmu busy-loop (5M iters, no sleep): %u cycles -- %u/iter",
-               (unsigned)stats.pmu_busy_loop_cycles, (unsigned)(stats.pmu_busy_loop_cycles / 5000000u));
-
-        /* kernel/pmu.c's VITA_TRACY_PMU_SAMPLE_INTERVAL_US, in ms; no shared
-         * constant for it since only this bring-up test reads it back. */
-        uint32_t elapsed_ms = stats.pmu_sample_ticks * 10u;
-        Report("  pmu: %u ticks (~%u ms), cycle delta %u", (unsigned)stats.pmu_sample_ticks,
-               (unsigned)elapsed_ms, (unsigned)stats.pmu_cycle_delta_total);
-        if (elapsed_ms > 0) {
-            uint64_t hz = ((uint64_t)stats.pmu_cycle_delta_total * 1000ull) / elapsed_ms;
-            Report("  implied clock: %llu Hz -- a plausible CPU clock (hundreds of",
-                   (unsigned long long)hz);
-            Report("  MHz) means the kernel-owned sampler genuinely works; zero or");
-            Report("  absurd means it doesn't");
+        Report("  PMU active mask: 0x%X, last error: %d", stats.pmu_active_mask, stats.pmu_last_error);
+        for (int cpu = 0; cpu < 4; ++cpu) {
+            Report("  PMU c%d: %u records, %u dropped, %u gaps, %u routing errors, %u counter errors",
+                cpu, stats.pmu_records[cpu], stats.pmu_dropped[cpu], stats.pmu_gaps[cpu],
+                stats.pmu_wrong_cpu[cpu], stats.pmu_counter_errors[cpu]);
         }
     }
-
-    int pmu_sample_stop = vita_tracy_kernel_pmu_sample_stop();
-    Report("vitaTracyPmuSampleStop: %d", pmu_sample_stop);
 
     Report("");
 }

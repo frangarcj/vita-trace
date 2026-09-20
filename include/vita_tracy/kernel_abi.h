@@ -36,11 +36,9 @@ int vitaTracyGetStats(VitaTracyStats *stats);
 int vitaTracyWaitForData(uint32_t timeout_us);
 int vitaTracyWakeup(void);
 
-/* Starts/stops a kernel-owned PMCCNTR sampler (kernel/pmu.c): a dedicated
- * kernel thread reads the cycle counter at PL1 and accumulates it into
- * VitaTracyStats.pmu_cycle_delta_total, entirely avoiding userland CP15
- * access. No config struct -- fixed to one core, cycle counter only,
- * for now. */
+/* Timer callbacks read whole-core counters at PL1. SetPmu selects the
+ * configuration while stopped; the default is cycles on cores 0..2 at
+ * 100 Hz. BUSY means resources or an existing PMU owner prevented access. */
 int vitaTracyPmuSampleStart(void);
 int vitaTracyPmuSampleStop(void);
 

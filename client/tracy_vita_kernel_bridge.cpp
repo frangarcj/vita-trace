@@ -21,7 +21,7 @@ namespace {
 constexpr uint32_t kDefaultSamplesPerCore = 2048;
 constexpr uint32_t kDefaultControlCapacity = 256;
 constexpr uint32_t kBatchLimit = 256;
-enum Command { None, Sampling, Stats, PmuStart, PmuStop, Detach };
+enum Command { None, Sampling, Stats, PmuConfigure, PmuStart, PmuStop, Detach };
 
 struct Bridge {
     SceUID memblock = -1;
@@ -35,6 +35,7 @@ struct Bridge {
     uint32_t requested_hz = 0;
     uint32_t requested_flags = 0;
     VitaTracyStats *requested_stats = nullptr;
+    VitaTracyPmuConfig requested_pmu{};
     VitaTracyClockSync clock{};
     uint32_t reported_drops = 0;
     uint32_t allocation_drops = 0;
@@ -212,6 +213,12 @@ int DrainThread(SceSize args, void *argp) {
                 result = vitaTracyGetStats(g_bridge.requested_stats);
             } else if (command == PmuStart) {
                 result = vitaTracyPmuSampleStart();
+                if (result == 0) {
+                    const char *scope = "vita-tracy PMU: whole-core counts, not per-thread CPU time; 0x68 counts renamed instructions";
+                    TracyAppInfo(scope, strlen(scope));
+                }
+            } else if (command == PmuConfigure) {
+                result = vitaTracySetPmu(&g_bridge.requested_pmu);
             } else if (command == PmuStop) {
                 result = vitaTracyPmuSampleStop();
             } else {
@@ -391,6 +398,14 @@ int vita_tracy_kernel_attach(uint32_t samples_per_core, uint32_t control_capacit
 
 int vita_tracy_kernel_set_sampling(uint32_t frequency_hz) {
     return vita_tracy_kernel_set_sampling_ex(frequency_hz, 0);
+}
+
+int vita_tracy_kernel_configure_pmu(const VitaTracyPmuConfig *config) {
+    if (!config) return VITA_TRACY_ERROR_ARGS;
+    std::lock_guard<std::mutex> lock(g_api_mutex);
+    if (!g_bridge.shared) return VITA_TRACY_ERROR_STATE;
+    g_bridge.requested_pmu = *config;
+    return Submit(PmuConfigure);
 }
 
 int vita_tracy_kernel_set_sampling_ex(uint32_t frequency_hz, uint32_t flags) {

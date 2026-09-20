@@ -54,6 +54,22 @@ target_link_libraries(vita_tracy_timer_tests PRIVATE doctest::doctest)
 target_compile_features(vita_tracy_timer_tests PRIVATE cxx_std_17)
 doctest_discover_tests(vita_tracy_timer_tests)
 
+add_executable(vita_tracy_pmu_session_tests
+    main.cpp pmu_session_test.cpp
+    ${VITA_TRACY_SOURCE_DIR}/kernel/pmu_session.c
+    ${VITA_TRACY_SOURCE_DIR}/common/pmu_core.c
+    ${VITA_TRACY_SOURCE_DIR}/common/shared_layout.c
+    ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
+)
+target_include_directories(vita_tracy_pmu_session_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/fakes
+    ${VITA_TRACY_SOURCE_DIR}/include
+    ${VITA_TRACY_SOURCE_DIR}/kernel
+)
+target_link_libraries(vita_tracy_pmu_session_tests PRIVATE doctest::doctest)
+target_compile_features(vita_tracy_pmu_session_tests PRIVATE cxx_std_17)
+doctest_discover_tests(vita_tracy_pmu_session_tests)
+
 # The offline symbolication tool is host-side Python; its tests run in the
 # same suite so a change there fails the build like any other.
 find_package(Python3 COMPONENTS Interpreter)

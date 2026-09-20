@@ -1,7 +1,8 @@
 add_executable(tracy_kernel
     main.c
     module_snapshot.c
-    pmu.c
+    pmu_session.c
+    pmu_arm.c
     process_events.c
     sampler_debug_fallback.c
     sampler_pamgr.c
@@ -10,6 +11,7 @@ add_executable(tracy_kernel
     ${VITA_TRACY_SOURCE_DIR}/common/shared_layout.c
     ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
     ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c
+    ${VITA_TRACY_SOURCE_DIR}/common/pmu_core.c
     state.c
 )
 

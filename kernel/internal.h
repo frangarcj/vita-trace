@@ -33,10 +33,6 @@ typedef struct VitaTracyKernelState {
      * see kernel/sampler_debug_fallback.c. */
     SceUID control_thread;
 
-    /* Kernel-owned PMCCNTR sampler -- see vita_tracy_pmu_sample_start. */
-    SceUID pmu_sample_thread;
-    int pmu_sample_should_run;
-
     VitaTracyStats stats;
 } VitaTracyKernelState;
 
@@ -66,8 +62,7 @@ int vita_tracy_sampler_stop(VitaTracyKernelState *st);
 
 int vita_tracy_pmu_configure(VitaTracyKernelState *st, const VitaTracyPmuConfig *cfg);
 
-/* Kernel-owned PMCCNTR sampler: reads the cycle counter at PL1 from a
- * dedicated thread, never touching userland CP15 access at all. */
+/* Whole-core IRQ PMU records; setup/restore helpers run only at boundaries. */
 int vita_tracy_pmu_sample_start(VitaTracyKernelState *st);
 int vita_tracy_pmu_sample_stop(VitaTracyKernelState *st);
 
