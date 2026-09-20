@@ -6,6 +6,7 @@
 #include <psp2kern/power.h>
 
 #include "internal.h"
+#include "irq_frame.h"
 #include "vita_tracy/kernel_abi.h"
 #include "vita_tracy/pmu_overflow.h"
 
@@ -15,7 +16,7 @@
 #if VITA_TRACY_IRQ_CORE_MASK == 0 || (VITA_TRACY_IRQ_CORE_MASK & ~7u)
 #error "IRQ sampling must select at least one app core (bits 0..2)"
 #endif
-#define VITA_TRACY_IRQ_HANDLER_PRIORITY 7
+#define VITA_TRACY_IRQ_HANDLER_PRIORITY 0
 #define IRQ_ADMISSION_OPEN 0x80000000u
 #define IRQ_ADMISSION_ACTIVE 1u
 
@@ -47,29 +48,12 @@ typedef struct IrqSampler {
 
 static IrqSampler g_irq;
 
-/* Excpmgr requires the registration pointer to name eight writable bytes
- * immediately followed by executable handler code. Keep that unusual ABI in
- * one tiny RWX section. The ARM branch may use a linker veneer to enter a
- * Thumb-compiled C function. There is no public unregister call, so once this
- * node is registered module_stop refuses to unload the plugin. */
-extern unsigned char vita_tracy_irq_handler_node[];
-void vita_tracy_irq_handler_c(SceExcpmgrExceptionContext *context, SceExcpHandlingCode code);
-
-#ifdef __vita__
-__asm__(
-    ".pushsection .vita_tracy_exc_handler,\"awx\",%progbits\n"
-    ".balign 4\n"
-    ".arm\n"
-    ".global vita_tracy_irq_handler_node\n"
-    ".type vita_tracy_irq_handler_node,%object\n"
-    "vita_tracy_irq_handler_node:\n"
-    ".word 0\n"
-    ".word 0\n"
-    "b vita_tracy_irq_handler_c\n"
-    ".size vita_tracy_irq_handler_node, .-vita_tracy_irq_handler_node\n"
-    ".popsection\n");
-#else
-unsigned char vita_tracy_irq_handler_node[12];
+/* The assembly entry builds our private frame and always tail-chains to the
+ * next raw handler. It does not receive a Sony C exception-context pointer. */
+extern uint32_t vita_tracy_irq_handler_node[];
+void vita_tracy_irq_handler_c(const VitaTracyIrqFrame *context);
+#ifndef __vita__
+uint32_t vita_tracy_irq_handler_node[2];
 #endif
 
 static void initialize(void) {
@@ -164,17 +148,20 @@ static int run_job(IrqCpu *cpu, int operation) {
 static int register_handler(VitaTracyKernelState *st) {
     if (__atomic_load_n(&g_irq.registered, __ATOMIC_ACQUIRE)) {
         __atomic_store_n(&st->stats.sample_irq_handler_registered, 1u, __ATOMIC_RELEASE);
-        return 0;
+        return vita_tracy_irq_handler_node[0] ? 0 : VITA_TRACY_ERROR_STATE;
     }
     int ret = ksceExcpmgrRegisterHandler(SCE_EXCP_IRQ, VITA_TRACY_IRQ_HANDLER_PRIORITY,
                                          vita_tracy_irq_handler_node);
     if (ret < 0) return ret;
     __atomic_store_n(&g_irq.registered, 1u, __ATOMIC_RELEASE);
     __atomic_store_n(&st->stats.sample_irq_handler_registered, 1u, __ATOMIC_RELEASE);
+    /* Success pins this node even if its predecessor is unexpectedly absent.
+     * Do not arm a PMU source when tail-chaining has nowhere valid to go. */
+    if (!vita_tracy_irq_handler_node[0]) return VITA_TRACY_ERROR_STATE;
     return 0;
 }
 
-static void handle_irq(uint32_t cpu_id, SceExcpmgrExceptionContext *context) {
+static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
     if (!__atomic_load_n(&g_irq.service_enabled, __ATOMIC_ACQUIRE)) return;
 
     VitaTracyKernelState *st = g_irq.state;
@@ -212,8 +199,17 @@ static void handle_irq(uint32_t cpu_id, SceExcpmgrExceptionContext *context) {
     /* IRQ entry preserves the interrupted CPSR in SPSR. Only PL0 user mode is
      * useful as an application PC; syscall/kernel samples must not be charged
      * to the user function that happened to issue them. */
-    if ((context->SPSR & 0x1Fu) != 0x10u) {
+    if ((context->spsr & 0x1Fu) != 0x10u) {
         __atomic_fetch_add(&st->stats.sample_irq_kernel[cpu_id], 1u, __ATOMIC_RELAXED);
+        return;
+    }
+
+    /* ARM exception entry sets LR_irq to resume-PC + 4 in both ARM and Thumb
+     * state. Unlike a C callback's LR, the assembly frame contains that bank. */
+    const uint32_t pc = context->irq_lr - 4u;
+    const uint32_t alignment = (context->spsr & (1u << 5)) ? 1u : 3u;
+    if (context->irq_lr <= 4u || (pc & alignment) || (context->spsr & (1u << 24))) {
+        __atomic_fetch_add(&st->stats.sample_irq_context_errors[cpu_id], 1u, __ATOMIC_RELAXED);
         return;
     }
 
@@ -222,18 +218,17 @@ static void handle_irq(uint32_t cpu_id, SceExcpmgrExceptionContext *context) {
     sample.timestamp = vita_tracy_kernel_now();
     sample.pid = (uint32_t)info.process_id;
     sample.tid = (uint32_t)info.thread_id; /* Global GUID; resolved outside IRQ. */
-    sample.pc = context->address_of_faulting_instruction;
+    sample.pc = pc;
     sample.sp = context->sp;
     sample.lr = context->lr;
     sample.cpu = (uint16_t)cpu_id;
     sample.flags = VITA_TRACE_SAMPLE_PMU_IRQ | VITA_TRACE_SAMPLE_GLOBAL_TID;
-    if (context->SPSR & (1u << 5)) sample.flags |= VITA_TRACE_SAMPLE_THUMB;
+    if (context->spsr & (1u << 5)) sample.flags |= VITA_TRACE_SAMPLE_THUMB;
     vita_tracy_emit_sample(st, cpu_id, &sample);
     vita_tracy_notify(st);
 }
 
-void vita_tracy_irq_handler_c(SceExcpmgrExceptionContext *context, SceExcpHandlingCode code) {
-    (void)code;
+void vita_tracy_irq_handler_c(const VitaTracyIrqFrame *context) {
     const uint32_t cpu_id = (uint32_t)ksceKernelCpuId();
     if (cpu_id >= VITA_TRACE_CORE_COUNT) return;
     IrqCpu *cpu = &g_irq.cpus[cpu_id];

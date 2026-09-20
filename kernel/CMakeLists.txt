@@ -1,3 +1,4 @@
+enable_language(ASM)
 add_executable(tracy_kernel
     main.c
     module_snapshot.c
@@ -7,6 +8,7 @@ add_executable(tracy_kernel
     sampler.c
     sampler_debug_fallback.c
     sampler_irq.c
+    irq_entry.S
     sampler_pamgr.c
     service.c
     tick_source.c

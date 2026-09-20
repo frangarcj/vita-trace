@@ -15,12 +15,13 @@
 
 extern "C" {
 #include "internal.h"
+#include "irq_frame.h"
 #include "vita_tracy/kernel_abi.h"
 #include "vita_tracy/pmu_core.h"
 #include "vita_tracy/shared_layout.h"
 #include "vita_tracy/shared_ring.h"
 
-void vita_tracy_irq_handler_c(SceExcpmgrExceptionContext *context, SceExcpHandlingCode code);
+void vita_tracy_irq_handler_c(const VitaTracyIrqFrame *context);
 void vita_tracy_sampler_irq_test_reset(void);
 }
 
@@ -51,6 +52,7 @@ struct Fake {
     uint32_t notify_events = 0;
     int handler_registrations = 0;
     int handler_result = 0;
+    bool no_next_handler = false;
     int context_result = 0;
     VitaTracyKernelState *stop_in_context = nullptr;
     int stop_result = 0;
@@ -121,10 +123,10 @@ struct Fixture {
         CHECK(fake.jobs.empty());
     }
 
-    void overflow(unsigned core, SceExcpmgrExceptionContext &context) {
+    void overflow(unsigned core, VitaTracyIrqFrame &context) {
         fake.core = static_cast<int>(core);
         fake.banks[core].overflow |= VITA_PMU_CYCLE_BIT;
-        vita_tracy_irq_handler_c(&context, SCE_EXCPMGR_EXCEPTION_HANDLED);
+        vita_tracy_irq_handler_c(&context);
         fake.core = 0;
     }
 };
@@ -146,20 +148,22 @@ uint64_t vita_tracy_kernel_now(void) { return fake.now; }
 
 int ksceExcpmgrRegisterHandler(SceExcpKind kind, int priority, void *handler) {
     CHECK(kind == SCE_EXCP_IRQ);
-    CHECK(priority == 7);
+    CHECK(priority == 0);
     ++fake.handler_registrations;
     fake.registered_handler = handler;
+    if (fake.handler_result >= 0)
+        static_cast<uint32_t *>(handler)[0] = fake.no_next_handler ? 0u : 0x12340000u;
     return fake.handler_result;
 }
 
 int ksceKernelGetThreadContextInfo(SceKernelThreadContextInfo *info) {
     if (fake.nested_context) {
         fake.nested_context = false;
-        SceExcpmgrExceptionContext nested{};
-        nested.SPSR = 0x10u;
-        nested.address_of_faulting_instruction = 0x81234000u;
+        VitaTracyIrqFrame nested{};
+        nested.spsr = 0x10u;
+        nested.irq_lr = 0x81234000u + 4u;
         fake.banks[fake.core].overflow |= VITA_PMU_CYCLE_BIT;
-        vita_tracy_irq_handler_c(&nested, SCE_EXCPMGR_EXCEPTION_HANDLED);
+        vita_tracy_irq_handler_c(&nested);
     }
     if (fake.stop_in_context) {
         auto *state = fake.stop_in_context;
@@ -248,11 +252,11 @@ TEST_CASE_FIXTURE(Fixture, "IRQ sampler prepares all app cores and restores them
 
 TEST_CASE_FIXTURE(Fixture, "IRQ sampler captures target user context without suspending it") {
     REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
-    SceExcpmgrExceptionContext context{};
-    context.address_of_faulting_instruction = 0x81234566u;
+    VitaTracyIrqFrame context{};
+    context.irq_lr = 0x81234566u + 4u;
     context.sp = 0x83001000u;
     context.lr = 0x81230001u;
-    context.SPSR = 0x10u | (1u << 5);
+    context.spsr = 0x10u | (1u << 5);
 
     overflow(1, context);
 
@@ -277,8 +281,8 @@ TEST_CASE_FIXTURE(Fixture, "IRQ sampler ignores unrelated IRQs without touching 
     REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
     fake.context_result = -77;
     fake.core = 2;
-    SceExcpmgrExceptionContext context{};
-    vita_tracy_irq_handler_c(&context, SCE_EXCPMGR_EXCEPTION_HANDLED);
+    VitaTracyIrqFrame context{};
+    vita_tracy_irq_handler_c(&context);
     CHECK(state.stats.sample_irq_calls[2] == 1);
     CHECK(state.stats.sample_irq_overflows[2] == 0);
     CHECK(state.stats.sample_irq_context_errors[2] == 0);
@@ -287,8 +291,8 @@ TEST_CASE_FIXTURE(Fixture, "IRQ sampler ignores unrelated IRQs without touching 
 
 TEST_CASE_FIXTURE(Fixture, "IRQ sampler services overflow but filters other processes and kernel mode") {
     REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
-    SceExcpmgrExceptionContext context{};
-    context.SPSR = 0x10u;
+    VitaTracyIrqFrame context{};
+    context.spsr = 0x10u;
 
     fake.thread.process_id = 999;
     overflow(0, context);
@@ -296,7 +300,7 @@ TEST_CASE_FIXTURE(Fixture, "IRQ sampler services overflow but filters other proc
     CHECK(vita_trace_ring_pending(vita_trace_shared_core_ring(memory.data(), 0)) == 0);
 
     fake.thread.process_id = 123;
-    context.SPSR = 0x13u;
+    context.spsr = 0x13u;
     overflow(0, context);
     CHECK(state.stats.sample_irq_kernel[0] == 1);
     CHECK(state.stats.sample_irq_overflows[0] == 2);
@@ -305,8 +309,8 @@ TEST_CASE_FIXTURE(Fixture, "IRQ sampler services overflow but filters other proc
 TEST_CASE_FIXTURE(Fixture, "IRQ sampler records exception-context lookup failures") {
     REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
     fake.context_result = -99;
-    SceExcpmgrExceptionContext context{};
-    context.SPSR = 0x10u;
+    VitaTracyIrqFrame context{};
+    context.spsr = 0x10u;
     overflow(0, context);
     CHECK(state.stats.sample_irq_context_errors[0] == 1);
     CHECK(vita_trace_ring_pending(vita_trace_shared_core_ring(memory.data(), 0)) == 0);
@@ -317,9 +321,9 @@ TEST_CASE_FIXTURE(Fixture, "IRQ sampler reports PMU ownership loss through a ret
     fake.core = 1;
     fake.banks[1].overflow = VITA_PMU_CYCLE_BIT;
     fake.banks[1].interrupts = 0; // A different owner changed our configuration.
-    SceExcpmgrExceptionContext context{};
-    context.SPSR = 0x10u;
-    vita_tracy_irq_handler_c(&context, SCE_EXCPMGR_EXCEPTION_HANDLED);
+    VitaTracyIrqFrame context{};
+    context.spsr = 0x10u;
+    vita_tracy_irq_handler_c(&context);
     fake.core = 0;
 
     CHECK(state.stats.sample_irq_last_error == VITA_TRACY_ERROR_STATE);
@@ -361,9 +365,9 @@ TEST_CASE_FIXTURE(Fixture, "IRQ handler registration failure rolls back prepared
 TEST_CASE_FIXTURE(Fixture, "IRQ stop retains state while an admitted callback still uses it") {
     REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
     fake.stop_in_context = &state;
-    SceExcpmgrExceptionContext context{};
-    context.SPSR = 0x10u;
-    context.address_of_faulting_instruction = 0x81234000u;
+    VitaTracyIrqFrame context{};
+    context.spsr = 0x10u;
+    context.irq_lr = 0x81234000u + 4u;
     overflow(0, context);
     CHECK(fake.stop_result == VITA_TRACY_ERROR_BUSY);
     CHECK(fake.banks[0].enable == VITA_PMU_CYCLE_BIT);
@@ -378,9 +382,9 @@ TEST_CASE_FIXTURE(Fixture, "IRQ stop retains state while an admitted callback st
 TEST_CASE_FIXTURE(Fixture, "nested IRQ callbacks cannot become two producers for one ring") {
     REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
     fake.nested_context = true;
-    SceExcpmgrExceptionContext context{};
-    context.SPSR = 0x10u;
-    context.address_of_faulting_instruction = 0x81234000u;
+    VitaTracyIrqFrame context{};
+    context.spsr = 0x10u;
+    context.irq_lr = 0x81234000u + 4u;
     overflow(1, context);
     CHECK(state.stats.samples_emitted[1] == 1);
     CHECK(state.stats.sample_irq_calls[1] == 1);
@@ -438,10 +442,58 @@ TEST_CASE_FIXTURE(Fixture, "IRQ sampler honors the build-selected app-core mask"
         CHECK(fake.banks[cpu].enable == (selected ? VITA_PMU_CYCLE_BIT : 0u));
         CHECK(fake.banks[cpu].interrupts == (selected ? VITA_PMU_CYCLE_BIT : 0u));
         CHECK(fake.starts[cpu] == (selected ? 2u : 0u));
-        SceExcpmgrExceptionContext context{};
-        context.SPSR = 0x10u;
-        context.address_of_faulting_instruction = 0x81234000u;
+        VitaTracyIrqFrame context{};
+        context.spsr = 0x10u;
+        context.irq_lr = 0x81234000u + 4u;
         overflow(cpu, context);
         CHECK(state.stats.samples_emitted[cpu] == (selected ? 1u : 0u));
     }
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ entry requires a next handler before any PMU source is armed") {
+    fake.no_next_handler = true;
+    CHECK(vita_tracy_sampler_irq_start(&state) == VITA_TRACY_ERROR_STATE);
+    CHECK(vita_tracy_sampler_irq_handler_registered());
+    CHECK(state.stats.sample_irq_handler_registered == 1);
+    for (const auto &bank : fake.banks) {
+        CHECK(bank.enable == 0);
+        CHECK(bank.interrupts == 0);
+        CHECK(bank.cycles == 200);
+    }
+    CHECK(vita_tracy_sampler_irq_start(&state) == VITA_TRACY_ERROR_STATE);
+    CHECK(fake.handler_registrations == 1);
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ PCs come from LR irq minus four in ARM and Thumb states") {
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    for (bool thumb : {false, true}) {
+        VitaTracyIrqFrame context{};
+        context.spsr = 0x10u | (thumb ? 0x20u : 0u);
+        const uint32_t pc = thumb ? 0x81234566u : 0x81234564u;
+        context.irq_lr = pc + 4u;
+        context.lr = 0x89998889u;
+        overflow(0, context);
+        VitaTraceSample sample{};
+        REQUIRE(vita_trace_ring_try_pop(vita_trace_shared_core_ring(memory.data(), 0), &sample));
+        CHECK(sample.pc == pc);
+        CHECK(sample.lr == context.lr);
+        CHECK(context.irq_lr == pc + 4u);
+        CHECK(context.spsr == (0x10u | (thumb ? 0x20u : 0u)));
+    }
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ invalid resume addresses and unsupported instruction states are rejected") {
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    for (uint32_t link : {0u, 4u, 0x81234565u, 0x81234566u}) {
+        VitaTracyIrqFrame context{};
+        context.spsr = 0x10u;
+        context.irq_lr = link;
+        overflow(0, context);
+    }
+    VitaTracyIrqFrame context{};
+    context.spsr = 0x01000030u;
+    context.irq_lr = 0x81234568u;
+    overflow(0, context);
+    CHECK(state.stats.sample_irq_context_errors[0] == 5);
+    CHECK(vita_trace_ring_pending(vita_trace_shared_core_ring(memory.data(), 0)) == 0);
 }
