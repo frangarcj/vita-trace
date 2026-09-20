@@ -19,3 +19,5 @@ VitaTracyKernel:
         - vitaTracySetPmu
         - vitaTracySnapshotModules
         - vitaTracyGetStats
+        - vitaTracyPmuSampleStart
+        - vitaTracyPmuSampleStop

@@ -49,6 +49,21 @@ typedef struct VitaTracyStats {
     uint32_t samples_dropped[4]; /* per core */
     uint32_t control_dropped;
     uint32_t uptime_ms;
+
+    /* Kernel-owned PMU cycle-count sampling (vitaTracyPmuSampleStart/Stop):
+     * a dedicated kernel thread, pinned to one core, reads PMCCNTR at PL1
+     * and accumulates deltas here -- userland never touches CP15 PMU
+     * registers directly, sidestepping the PMUSERENR-visibility puzzle in
+     * kernel/pmu.c's file comment (PL1 doesn't need PMUSERENR at all). */
+    uint32_t pmu_cycle_delta_total;
+    uint32_t pmu_sample_ticks;
+
+    /* One-shot: PMCCNTR delta over a fixed busy loop with no sleep in
+     * between, measured entirely in kernel context right as the sampler
+     * starts -- isolates "does the counter advance during active
+     * execution" from "does it advance across mostly-idle wall-clock
+     * time", which pmu_cycle_delta_total alone cannot distinguish. */
+    uint32_t pmu_busy_loop_cycles;
 } VitaTracyStats;
 
 #ifdef __cplusplus

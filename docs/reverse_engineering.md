@@ -204,7 +204,20 @@ the stub for it but declares it in no header.
 The write of `0x8000003F` to PMCNTENSET also answers, tentatively, how many
 counters exist: the cycle counter plus six programmable ones.
 
-## Measured on hardware (3.65, 2026-08-21)
+## Measured on hardware (3.60, 2026-08-21)
+
+Corrected 2026-08-21: earlier notes from this bring-up said 3.65. The
+console's *reported* `sceKernelGetSystemSwVersion()` can be spoofed and
+wasn't trustworthy either way; the real number is the `sys_version` field
+inside the SCE header of the console's own `os0:kd/*.skprx` files, which is
+part of what the loader cryptographically verifies and can't be faked at
+that level. Decrypting `sysmem.skprx`/`threadmgr.skprx`/`modulemgr.skprx`
+straight off this console gives `sys_version=0x36000000000` — 3.60, not
+3.65 — confirmed by cross-checking every NID this project's kernel module
+imports against those same decrypted files and finding zero mismatches
+against 3.60 that weren't already flagged as version-sensitive (see
+`VITA_TRACY_FIRMWARE` in `kernel/CMakeLists.txt`, which must stay at its
+`360` default for this console).
 
 The bring-up sample ran to completion on a retail console and settled three
 questions the firmware reading could only frame.
@@ -234,20 +247,240 @@ Three consequences for the design:
   high-resolution clock or the PMU, because a kernel module can write
   PMUSERENR and can reach the per-core `ScePmu*Reg` frames directly.
 
+## The four imports blocking a 3.36 `pamgr` port are all cold, all init-time
+
+Established 2026-08-21 by disassembling `pamgr` 3.36 (`os0/kd/pamgr.elf`),
+still with no hardware involved. This resolves — in `pamgr`'s favour — the
+question the previous section left open about porting it forward under
+taiHEN.
+
+Of `pamgr` 3.36's 55 kernel imports, three from `SceSysrootForKernel`
+(`0x4CD47EEE`, `0xA47EB096`, `0xC10A193B`) and one from
+`SceSyslibtraceForKernel` (`0x7CC73CDA`) don't resolve against retail 3.60's
+exports. Tracing every `blx` to their import stubs (`find_callsites.py`
+against `pamgr336.elf`) puts all four calls in the same stretch of
+initialization code, `0x81000200`–`0x810012c0`, well away from
+`_sceKernelPaAddArmTraceByKey`, `_sceKernelPaAddCounterTraceByKey` or either
+timebase function:
+
+- `0x81000200` is a multi-core barrier: it reads the executing core's ID
+  (`mrc p15, 0, r3, c0, c0, 5`), waits on a per-core cookie array through a
+  `SceThreadmgrForDriver` call, and only the core that clears the barrier
+  falls through.
+- That core then calls a `SceSblACMgrForKernel` function (`0x49509A83`,
+  resolves fine on retail) as a gate, and only if it succeeds calls the
+  unresolved `SceSyslibtraceForKernel` NID with a small struct (a version
+  field and a stack buffer) — a one-time "register with the host tracer"
+  handshake. This matches the existing note that this NID has no counterpart
+  in the prototype's exports either, so the call was inert even on firmware
+  where it resolves.
+- Separately, `0x81001250` writes `PMCR = 0x11` (bits E and X — enable
+  counting, export events to the trace bus) once per core, walking a
+  one-hot core mask through `ksceKernelGetThreadCpuAffinityMask` (NID
+  `0x83DC703D`) and `ksceKernelChangeThreadCpuAffinityMask` (NID
+  `0x6D0733A8`) bracketing each `mcr` — both confirmed by name against
+  `db/360/SceKernelThreadMgr.yml`, which is how a single core has to reach
+  another core's local CP15 state: migrate the calling thread there, write
+  locally, migrate back. Immediately after, it registers three of `pamgr`'s
+  own functions with `SceSysrootForKernel`, one call per NID.
+
+Disassembling what gets registered turns the three `SceSysrootForKernel`
+calls from "unresolved dependency" into "harmless outbound registration":
+
+| NID | Registers | What it does |
+|---|---|---|
+| `0xA47EB096` | `0x81000134` | `movw r0, #0x14d; bx lr` — the literal 333, no hardware read at all |
+| `0x4CD47EEE` | `0x81000108` | The same shared-page-offset-`0x88` torn-read as `scePerfGetTimebaseValue`, returned as `{r1:r0}` |
+| `0xC10A193B` | `0x810003ac` | `(selector, index) -> pointer` into one of two 16-entry internal arrays |
+
+So `SceSysrootForKernel` is a registry `pamgr` publishes its own timebase
+accessors *into* — not a dependency its trace machinery calls *out* to. The
+timebase-frequency function is confirmed to be a hardcoded constant with no
+underlying register; **the unit of 333 cannot be resolved by more
+disassembly**, only by runtime calibration, which the client already does.
+
+**Practical conclusion:** a 3.36 `pamgr` running under taiHEN on 3.60/3.65
+needs exactly these four call sites patched to a no-op/return-0 stub. Nothing
+downstream of them — ARM trace setup, counter trace setup, or either
+timebase accessor — reads any state those four calls would have produced.
+The PC-sampling path is now a known-shape patch, not an open question.
+
+**One thing worth carrying into the kernel plugin regardless of the taiHEN
+question:** PMCR is core-local CP15 state, and `pamgr`'s own boot code
+doesn't just write it once — it walks all four cores to do it, going through
+`SceThreadmgrForDriver` rather than a plain `mcr`, because a core can only
+write its own PMCR. Both functions it uses to do that are ordinary,
+NID-mapped `SceThreadmgrForDriver` exports with no ScePamgr involvement, and
+their stub object already exists in the installed toolchain
+(`libSceThreadmgrForDriver_stub.a`, already linked by `kernel/CMakeLists.txt`)
+even though `psp2kern/kernel/threadmgr.h` doesn't declare them yet — a local
+prototype is enough to use them today. `kernel/sampler_pamgr.c` reading
+`ScePmu*Reg` MMIO frames for a core other than the one it happens to be
+running on should not assume PMCR.E is set there; either reach every core
+the same way `pamgr` did, or confirm the MMIO frame reflects state
+independent of the local CP15 enable.
+
+## What SceSysrootForKernel's own implementation looks like, not just its callers
+
+Established 2026-08-21, this time reading the callee instead of inferring
+from the caller. `SceSysrootForKernel` isn't a separate module — its 3.36
+implementation lives inside `os0/kd/sysmem.elf` itself, in the same base
+memory-manager module that also provides `SceSysmemForKernel`. Locating the
+four target NIDs in 3.36's export table and disassembling each one directly
+(rather than reasoning about what a caller passes them) shows the mechanism
+is smaller and more specific than "a registry `pamgr` publishes into":
+
+| NID | Address (3.36) | Body |
+|---|---|---|
+| `0xA47EB096` | `0x810209f0` | `str r0, [g_sysroot + 0x430]; bx lr` |
+| `0x4CD47EEE` | `0x81020a18` | `str r0, [g_sysroot + 0x434]; bx lr` |
+| `0xC10A193B` | `0x81020a44` | `str r0, [g_sysroot + 0x438]; bx lr` |
+
+Each is a bare setter — store the caller's function pointer into one fixed
+field of a global struct, nothing else. Each has a paired *invoker*
+immediately following it in the file (`0x81020a00`, `0x81020a28`,
+`0x81020a54`): load the same field, and if it's non-NULL, `blx` to it,
+otherwise return 0. None of the three invokers are themselves exported under
+any NID — they're private helpers, called from whatever already-named
+`SceSysrootForKernel` export is the real public entry point for "get the
+timebase frequency" etc., which this pass didn't need to chase down.
+
+The fourth NID, `0x403B509E` — the one that still resolves on retail 3.60 —
+is architecturally unrelated: `ldr r3, [g_sysroot]; ldr r0, [r3, #0x7c]; bx
+lr`, a direct field read with no function-pointer indirection at all. It
+isn't part of the same mechanism, which is presumably why it survived.
+
+Comparing 3.36 against retail 3.60's `sysmem.elf` (`SceSysrootForKernel`
+export count 155 → 143) confirms the three setter/invoker pairs are gone
+from the *base module*, not merely unreachable because nothing calls them
+anymore. Sony didn't just remove `pamgr`; it excised the capability those
+three slots gave any module — register a timebase-frequency callback,
+register a timebase-value callback, register a private-data callback — from
+`sysmem.elf` itself, in the same firmware cleanup that dropped `pamgr`,
+`syslibtrace`, `dbgsdio` and `sdbgsdio`. That reframes the earlier "harmless
+outbound registration" framing slightly: it's not that retail ignores the
+registration, it's that retail's `sysmem.elf` no longer has anywhere to put
+it.
+
+## The scheduler never touches the PMU, and `threadmgr.elf` exports raw CP15 c9 access directly
+
+Established 2026-08-21 by disassembling `os0/kd/threadmgr.elf` on 3.36 and
+3.60 — a linear capstone sweep over every executable segment, filtered for
+any `mrc`/`mcr` touching CP15 c9, cross-checked against the export table so
+every hit lands inside a bounded, named function. This settles the question
+`kernel/pmu.c`'s comment poses directly: it does not.
+
+**No context-switch save/restore.** The sweep found 16 `c9`-looking hits (a
+few are data misdecoded as instructions — see the caveat in
+[[vita-firmware-re-workflow]] — confirmed by checking the surrounding bytes
+form a repeating 16-byte data table, not code). The 13 real hits land inside
+exactly six small (~150–400 byte), self-contained exported functions, none
+of which resemble a scheduler's bulk register save/restore block (no
+`push {r4-r11}`-style wide save, no `vmrs`/`vmsr`, no CPACR touch nearby).
+The one CP15 register genuinely pervasive throughout the module is
+`c13, c0, 4` (TPIDRPRW, "get current thread struct pointer"), used as a
+generic idiom everywhere, not specifically around these six functions. PMU
+state is therefore **not** transparently per-thread — it free-runs on
+whatever happens to be executing on that core, unmanaged by the scheduler,
+unless something explicitly reprograms it.
+
+**Six exported CP15-c9 accessors, one per PMU operation**, all
+`SceThreadmgrForKernel`/`SceThreadmgrForDriver`, identical in both firmware
+versions (NIDs and instruction sequences match 3.36 to 3.60, only addresses
+shift):
+
+| NID | Library | c9 register | Op |
+|---|---|---|---|
+| `0x6ECCDCBD` | ForKernel | PMSELR (`c9,c12,5`) + PMXEVTYPER (`c9,c13,1`) | select + configure an event counter |
+| `0x2EC8E376` | ForKernel | PMCNTENSET/PMCNTENCLR (`c9,c12,1`/`2`) | enable/disable a counter |
+| `0xD2BE5EFB` | ForKernel | PMSELR + PMXEVCNTR (`c9,c13,2`) write, PMCCNTR (`c9,c13,0`) write | set a counter's value |
+| `0xCE99E69C` | ForKernel | PMSELR + PMXEVCNTR read, PMCCNTR read | get a counter's value |
+| `0x5053B005` | ForDriver | **PMUSERENR** (`c9,c14,0`) | `mcr p15,0,r6,c9,c14,0` at 3.60 `0x8101335a` |
+| `0x1AAFA818` | ForDriver | **PMCR** (`c9,c12,0`) | `mcr p15,0,r6,c9,c12,0` at 3.60 `0x81013436` |
+
+The last two matter most: **`0x5053B005` writes PMUSERENR directly**, the
+same register that reads back 0 on retail via `sceKernelGetPMUSERENR` (see
+[[vita-tracy-hardware-facts]]). Independently re-disassembled both past the
+point the sub-agent that found them stopped, to the actual `mcr`. Both
+functions share an identical wrapper shape: check `TPIDRPRW` is valid (fails
+outside real thread context, error `0x80027101`), check the caller isn't in
+IRQ/exception mode (error `0x80028004`), and if the first argument (`r0`) is
+nonzero, run a permission check against a target UID before writing;
+`r0 == 0` takes a simpler self-targeting path. The value written is the raw
+second argument — full caller control, no masking seen. Both are plain
+`SceThreadmgrForDriver`/`ForKernel` exports pamgr itself imports (present in
+its own import table, `NOT FOUND` in vita-headers by name until now) — not
+ScePamgr-specific at all.
+
+**This is the retail PMU story completed, not just pamgr's**: PMUSERENR
+reads 0 on retail not because of a hardware fuse, but because nothing on
+retail ever calls the function that sets it — that function used to be
+reached from `pamgr`'s own boot code (§ above), and retail never runs it.
+Since context-switch doesn't touch `c9` at all (previous finding), a value
+written to PMUSERENR or PMCR on a core should hold for every thread that
+later runs there, not just the caller. Unverified: whether `r0`'s
+target-thread semantics change what "self" means for a value that's
+actually core-global hardware state — plausible that it doesn't matter
+(the notify-a-listener side effect at struct offset `0x70`/`0x64` looks like
+it's for a debugger UI, separate from the unconditional `mcr`), but this
+wants confirming on a CEX before depending on it, not just re-derived from
+the disassembly.
+
+## Confirmed: no CoreSight trace sink exists anywhere in retail firmware
+
+Established 2026-08-21 with a broader sweep than the one that first raised
+the question. All 46 retail 3.60 `os0/kd/*.elf` kernel modules were
+string-scanned (`ETB`, `ETR`, `TMC`, `trace`, `coresight`, `etm`, `ptm`,
+`funnel`, `tpiu`, `sink`, the CoreSight unlock key `C5ACCE55`, and more) —
+none contains any string suggesting a software-reachable path from
+CoreSight trace into system RAM. `crashdump.elf`, `excpmgr.elf` and
+`buserror.elf` — the modules likeliest to want one for their own postmortem
+purposes — were given the closest look; `crashdump.elf` and `buserror.elf`
+carry essentially no MMIO strings at all, delegating everything to
+`SceCpuForDriver`/`SceDebugForDriver`.
+
+One lead looked promising and resolved negative: `excpmgr.elf` has a
+`"=== Print Waypoint =="` table with entries (`Direct branch`,
+`Indirect branch`, `Debug entry/exit`, `Secure Monitor`, ...) straight out
+of ARM's own PTM waypoint-instruction vocabulary. Tracing its consumer
+(`0x8100165c`, called from three exception handlers) shows it walks a
+32-entry ring buffer inside a per-thread/exception-context struct in
+ordinary kernel RAM — every access is relative to a caller-supplied
+pointer, no MMIO literal anywhere near it. Sony's kernel programmers reused
+ARM's own terminology to classify which instruction type caused a nested
+exception entry, in software; it has nothing to do with CoreSight's trace
+stream.
+
+A device-table sweep (grepping every module for `Sce*Reg`-style names)
+turned up nothing beyond what `pamgr` already names — `bootimage.elf`,
+`dmacmgr.elf`, `intrmgr.elf`, `lowio.elf`, `sysmem.elf` and `syscon.elf`
+each expose their own unrelated peripherals (SPI, DMA, GPIO, timers, the
+PMIC). One loose thread: `sysmem.elf` names a register frame
+`SceL2CacheReg`, distinct from `pamgr`'s `ScePl310Reg` — possibly the same
+PL310 block under a different name, not confirmed as the same address.
+
+**Standing conclusion survives, now on a firmware-wide search rather than
+just `pamgr`'s own device list: PTM has no way to reach system RAM on this
+console, and should stay ruled out as a PC-sampling source** unless
+something changes this finding (a firmware version not checked, or a block
+this string/table sweep can't see because it's referenced only by a raw
+MMIO literal with no accompanying string).
+
 ## Open items from the design (validate on CEX or resolve via RE)
 
-- PC sampling without suspending the target thread. ScePamgr is absent from
-  3.60/3.65, so this is now a choice between porting the 3.36 module forward
-  under taiHEN and hooking the scheduler; neither has been attempted.
 - Whether ScePamgr's ARM/counter trace carries context-switch information at
-  all — unanswerable until one of those two paths works.
-- Whether retail firmware enables userland PMU access at all, i.e. what
-  `sceKernelGetPMUSERENR()` returns on a console. A linear disassembly sweep
-  of the 3.60 kernel for writes to PMUSERENR produced only false positives
-  from decoding data as code, so this is not answerable that way; the client
-  reads it at startup instead.
-- PMU counter semantics across context switches, and whether all six
-  programmable counters plus the cycle counter are really usable.
-- The unit of the 333 the timebase frequency call returns.
+  all — unanswerable until a taiHEN-ported 3.36 `pamgr` or a scheduler hook
+  actually runs. Low priority now that PTM is confirmed to have no memory
+  sink anywhere in retail firmware (see below), so this path is unlikely to
+  be worth pursuing regardless of the answer.
+- Whether calling `SceThreadmgrForDriver` NID `0x5053B005` with `(0, 1)`
+  from the kernel plugin actually sets PMUSERENR on a real console the way
+  the disassembly says, and whether it's still set for threads that run on
+  that core later (expected, since context-switch never touches `c9` — see
+  below — but expected isn't measured).
+- Whether all six programmable counters plus the cycle counter are usable
+  once PMCR and PMCNTENSET are programmed for real, and what values other
+  than pamgr's `0x8000003F` are safe.
+  search so far only covered the modules `pamgr` itself touches.
 - Firmware drift: NIDs/structs used by kernel-side RE code must be pinned per
   firmware branch (`kernel/platform/fw_360.c`, `fw_365.c`, ...).

@@ -1,3 +1,5 @@
+#include <psp2kern/kernel/cpu.h>
+#include <psp2kern/kernel/sysclib.h>
 #include <psp2kern/kernel/sysmem.h>
 #include <psp2kern/kernel/threadmgr.h>
 
@@ -55,6 +57,7 @@ void vita_tracy_emit_control(VitaTracyKernelState *st, const VitaTraceControlRec
 
 void vita_tracy_detach(VitaTracyKernelState *st) {
     vita_tracy_sampler_stop(st);
+    vita_tracy_pmu_sample_stop(st);
 
     if (st->map_uid > 0) {
         ksceKernelUserUnmap(st->map_uid);
@@ -242,5 +245,40 @@ int vitaTracyGetStats(VitaTracyStats *stats) {
     if (ksceKernelCopyToUserProc(caller_pid, stats, &st->stats, sizeof(st->stats)) < 0) {
         return VITA_TRACY_ERROR_ARGS;
     }
+    return VITA_TRACY_OK;
+}
+
+static int vitaTracyPmuSampleStart_impl(void);
+static int vitaTracyPmuSampleStop_impl(void);
+
+int vitaTracyPmuSampleStart(void) {
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+    int ret = vitaTracyPmuSampleStart_impl();
+    EXIT_SYSCALL(syscall_state);
+    return ret;
+}
+
+static int vitaTracyPmuSampleStart_impl(void) {
+    VitaTracyKernelState *st = vita_tracy_state();
+    if (st->target_pid == 0 || ksceKernelGetProcessId() != st->target_pid) return VITA_TRACY_ERROR_TARGET;
+    if (st->state == VITA_TRACY_STATE_UNINITIALIZED || st->state == VITA_TRACY_STATE_READY) {
+        return VITA_TRACY_ERROR_STATE;
+    }
+    return vita_tracy_pmu_sample_start(st);
+}
+
+int vitaTracyPmuSampleStop(void) {
+    uint32_t syscall_state;
+    ENTER_SYSCALL(syscall_state);
+    int ret = vitaTracyPmuSampleStop_impl();
+    EXIT_SYSCALL(syscall_state);
+    return ret;
+}
+
+static int vitaTracyPmuSampleStop_impl(void) {
+    VitaTracyKernelState *st = vita_tracy_state();
+    if (st->target_pid == 0 || ksceKernelGetProcessId() != st->target_pid) return VITA_TRACY_ERROR_TARGET;
+    vita_tracy_pmu_sample_stop(st);
     return VITA_TRACY_OK;
 }

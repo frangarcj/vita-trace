@@ -28,6 +28,8 @@ int vitaTracySetSampling(const VitaTracySamplingConfig *cfg);
 int vitaTracySetPmu(const VitaTracyPmuConfig *cfg);
 int vitaTracySnapshotModules(uint32_t target_pid);
 int vitaTracyGetStats(VitaTracyStats *stats);
+int vitaTracyPmuSampleStart(void);
+int vitaTracyPmuSampleStop(void);
 
 #ifdef __cplusplus
 }

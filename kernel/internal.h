@@ -23,6 +23,9 @@ typedef struct VitaTracyKernelState {
     int sampler_should_run;
     uint32_t sampling_hz;
 
+    SceUID pmu_sample_thread;
+    int pmu_sample_should_run;
+
     VitaTracyStats stats;
 } VitaTracyKernelState;
 
@@ -55,3 +58,6 @@ int vita_tracy_pmu_configure(VitaTracyKernelState *st, const VitaTracyPmuConfig 
  * source is found; see docs/reverse_engineering.md. */
 int vita_tracy_sampler_pamgr_start(VitaTracyKernelState *st);
 void vita_tracy_sampler_pamgr_stop(VitaTracyKernelState *st);
+
+int vita_tracy_pmu_sample_start(VitaTracyKernelState *st);
+void vita_tracy_pmu_sample_stop(VitaTracyKernelState *st);
