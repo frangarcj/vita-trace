@@ -1,6 +1,7 @@
 #include <psp2/sysmodule.h>
 
 #include <client/TracyProfiler.hpp>
+#include <mutex>
 
 #include "vita_tracy/client.h"
 
@@ -8,11 +9,15 @@ namespace {
 bool g_loaded_perf_module = false;
 bool g_profiler_started = false;
 int g_perf_module_status = 0;
+std::mutex g_lifetime_mutex;
 } // namespace
 
 extern "C" {
 
 int vita_tracy_init(void) {
+    std::lock_guard<std::mutex> lock(g_lifetime_mutex);
+    if (g_profiler_started) return 0; // Never change the clock of a live capture.
+    g_perf_module_status = 0;
     /* ScePerf is an optimisation, not a dependency. It supplies a finer
      * clock than the process timer and the domain the kernel backend
      * correlates against, but the profiler has to come up either way:
@@ -35,6 +40,7 @@ int vita_tracy_init(void) {
         g_profiler_started = true;
     }
 #endif
+    g_profiler_started = true;
     return 0;
 }
 
@@ -43,18 +49,27 @@ int vita_tracy_perf_module_status(void) {
 }
 
 void vita_tracy_shutdown(void) {
+    (void)vita_tracy_shutdown_checked();
+}
+
+int vita_tracy_shutdown_checked(void) {
+    std::lock_guard<std::mutex> lock(g_lifetime_mutex);
     /* Never destroy Tracy while the bridge can still enqueue events. */
-    if (vita_tracy_kernel_detach_checked() < 0) return;
+    int ret = vita_tracy_kernel_detach_checked();
+    if (ret < 0) return ret;
 #if defined(TRACY_DELAYED_INIT) && defined(TRACY_MANUAL_LIFETIME)
     if (g_profiler_started) {
         tracy::ShutdownProfiler();
         g_profiler_started = false;
     }
 #endif
+    g_profiler_started = false;
     if (g_loaded_perf_module) {
-        sceSysmoduleUnloadModule(SCE_SYSMODULE_PERF);
+        ret = sceSysmoduleUnloadModule(SCE_SYSMODULE_PERF);
+        if (ret < 0) return ret;
         g_loaded_perf_module = false;
     }
+    return 0;
 }
 
 } // extern "C"

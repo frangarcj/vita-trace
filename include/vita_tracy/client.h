@@ -25,6 +25,9 @@ int vita_tracy_perf_module_status(void);
 
 /* Unloads only what vita_tracy_init loaded. */
 void vita_tracy_shutdown(void);
+/* Reports failed detach/module unload. Safe to retry; never destroys Tracy
+ * while the bridge might still enqueue. Producers must already be stopped. */
+int vita_tracy_shutdown_checked(void);
 
 /* Raw ScePerf timebase, the clock domain Tracy timestamps and kernel
  * backend events are both expressed in. */
