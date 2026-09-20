@@ -14,13 +14,14 @@ static void write_reg(const VitaPmuIo *io, VitaPmuRegister reg, uint32_t value) 
 }
 
 static int owns_registers(const VitaPmuOverflow *overflow, const VitaPmuIo *io) {
-    (void)overflow;
-    return (read_reg(io, VITA_PMU_PMCR) & PMCR_CONTROL) == 1u &&
-           read_reg(io, VITA_PMU_CNTEN) == VITA_PMU_CYCLE_BIT &&
-           read_reg(io, VITA_PMU_INTEN) == VITA_PMU_CYCLE_BIT;
+    if ((read_reg(io, VITA_PMU_PMCR) & PMCR_CONTROL) != 1u) return 0;
+    if (overflow->armed)
+        return read_reg(io, VITA_PMU_CNTEN) == VITA_PMU_CYCLE_BIT &&
+               read_reg(io, VITA_PMU_INTEN) == VITA_PMU_CYCLE_BIT;
+    return read_reg(io, VITA_PMU_CNTEN) == 0 && read_reg(io, VITA_PMU_INTEN) == 0;
 }
 
-int vita_pmu_overflow_acquire(VitaPmuOverflow *overflow, const VitaPmuIo *io,
+int vita_pmu_overflow_prepare(VitaPmuOverflow *overflow, const VitaPmuIo *io,
                               uint32_t period_cycles) {
     if (!overflow || !io || !io->read || !io->write || period_cycles == 0)
         return VITA_PMU_ERROR_ARGS;
@@ -36,18 +37,35 @@ int vita_pmu_overflow_acquire(VitaPmuOverflow *overflow, const VitaPmuIo *io,
     overflow->saved_cycles = read_reg(io, VITA_PMU_CYCLES);
     overflow->preload = 0u - period_cycles;
 
-    /* Run the cycle counter undivided. The counter is preloaded before its
-     * interrupt and count-enable bits become live. */
+    /* Run the cycle counter undivided. Nothing counts until arm(). */
     write_reg(io, VITA_PMU_PMCR, (overflow->saved_pmcr & ~PMCR_CONTROL) | 1u);
     write_reg(io, VITA_PMU_CYCLES, overflow->preload);
-    write_reg(io, VITA_PMU_INTEN, VITA_PMU_CYCLE_BIT);
-    write_reg(io, VITA_PMU_CNTEN, VITA_PMU_CYCLE_BIT);
     overflow->acquired = 1;
     return 0;
 }
 
-int vita_pmu_overflow_service(VitaPmuOverflow *overflow, const VitaPmuIo *io) {
+int vita_pmu_overflow_arm(VitaPmuOverflow *overflow, const VitaPmuIo *io) {
     if (!overflow || !overflow->acquired || !io || !io->read || !io->write)
+        return VITA_PMU_ERROR_ARGS;
+    if (overflow->armed) return 0;
+    if (!owns_registers(overflow, io)) {
+        overflow->acquired = 0;
+        return VITA_PMU_ERROR_OWNERSHIP;
+    }
+    write_reg(io, VITA_PMU_INTEN, VITA_PMU_CYCLE_BIT);
+    write_reg(io, VITA_PMU_CNTEN, VITA_PMU_CYCLE_BIT);
+    overflow->armed = 1;
+    return 0;
+}
+
+int vita_pmu_overflow_acquire(VitaPmuOverflow *overflow, const VitaPmuIo *io,
+                              uint32_t period_cycles) {
+    int ret = vita_pmu_overflow_prepare(overflow, io, period_cycles);
+    return ret < 0 ? ret : vita_pmu_overflow_arm(overflow, io);
+}
+
+int vita_pmu_overflow_service(VitaPmuOverflow *overflow, const VitaPmuIo *io) {
+    if (!overflow || !overflow->acquired || !overflow->armed || !io || !io->read || !io->write)
         return VITA_PMU_ERROR_ARGS;
     if (!owns_registers(overflow, io)) {
         overflow->acquired = 0;
@@ -70,12 +88,15 @@ int vita_pmu_overflow_release(VitaPmuOverflow *overflow, const VitaPmuIo *io) {
         return VITA_PMU_ERROR_OWNERSHIP;
     }
 
-    write_reg(io, VITA_PMU_INTCLR, VITA_PMU_CYCLE_BIT);
-    write_reg(io, VITA_PMU_CNTCLR, VITA_PMU_CYCLE_BIT);
+    if (overflow->armed) {
+        write_reg(io, VITA_PMU_INTCLR, VITA_PMU_CYCLE_BIT);
+        write_reg(io, VITA_PMU_CNTCLR, VITA_PMU_CYCLE_BIT);
+    }
     if (read_reg(io, VITA_PMU_OVSR) & VITA_PMU_CYCLE_BIT)
         write_reg(io, VITA_PMU_OVSR, VITA_PMU_CYCLE_BIT);
     write_reg(io, VITA_PMU_CYCLES, overflow->saved_cycles);
     write_reg(io, VITA_PMU_PMCR, overflow->saved_pmcr);
+    overflow->armed = 0;
     overflow->acquired = 0;
     return 0;
 }

@@ -10,13 +10,21 @@ extern "C" {
 
 typedef struct VitaPmuOverflow {
     uint32_t acquired;
+    uint32_t armed;
     uint32_t preload;
     uint32_t saved_pmcr;
     uint32_t saved_cycles;
 } VitaPmuOverflow;
 
+/* Configures the cycle counter but leaves both count and interrupt disabled.
+ * This lets a platform install its IRQ handler only after every requested
+ * core has proved that its PMU is available. */
+int vita_pmu_overflow_prepare(VitaPmuOverflow *overflow, const VitaPmuIo *io,
+                              uint32_t period_cycles);
+int vita_pmu_overflow_arm(VitaPmuOverflow *overflow, const VitaPmuIo *io);
+
 /* Takes exclusive ownership of the cycle counter and its overflow interrupt.
- * Existing counter/interrupt users are refused rather than reprogrammed. */
+ * Convenience wrapper around prepare + arm. */
 int vita_pmu_overflow_acquire(VitaPmuOverflow *overflow, const VitaPmuIo *io,
                               uint32_t period_cycles);
 

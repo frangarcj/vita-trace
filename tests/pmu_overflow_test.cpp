@@ -73,6 +73,39 @@ TEST_CASE("overflow sampler exclusively acquires the cycle counter without reset
     CHECK((r.pmcr & 0x39u) == 1u);
 }
 
+TEST_CASE("overflow preparation leaves IRQ and counter disabled until arm") {
+    Registers r;
+    VitaPmuOverflow overflow{};
+    auto io = r.io();
+
+    REQUIRE(vita_pmu_overflow_prepare(&overflow, &io, 500) == 0);
+    CHECK(overflow.acquired == 1);
+    CHECK(overflow.armed == 0);
+    CHECK(r.enabled == 0);
+    CHECK(r.interrupts == 0);
+    CHECK(r.cycles == 0u - 500u);
+
+    REQUIRE(vita_pmu_overflow_arm(&overflow, &io) == 0);
+    CHECK(overflow.armed == 1);
+    CHECK(r.enabled == VITA_PMU_CYCLE_BIT);
+    CHECK(r.interrupts == VITA_PMU_CYCLE_BIT);
+}
+
+TEST_CASE("prepared overflow state can be restored without ever arming") {
+    Registers r;
+    r.pmcr = (6u << 11) | 0x08u;
+    r.cycles = 0xCAFEBABEu;
+    VitaPmuOverflow overflow{};
+    auto io = r.io();
+    REQUIRE(vita_pmu_overflow_prepare(&overflow, &io, 500) == 0);
+
+    REQUIRE(vita_pmu_overflow_release(&overflow, &io) == 0);
+    CHECK(r.enabled == 0);
+    CHECK(r.interrupts == 0);
+    CHECK(r.cycles == 0xCAFEBABEu);
+    CHECK(r.pmcr == ((6u << 11) | 0x08u));
+}
+
 TEST_CASE("overflow sampler refuses existing PMU owners and pending cycle overflow") {
     for (int mode = 0; mode < 3; ++mode) {
         Registers r;
