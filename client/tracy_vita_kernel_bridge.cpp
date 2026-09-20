@@ -147,9 +147,10 @@ void EmitControl(const VitaTraceControlRecord &record) {
          * be rebuilt on the PC; see tools/symbol_map.py. */
         const auto &mod = record.payload.module_snapshot;
         for (uint32_t i = 0; i < mod.segment_count && i < VITA_TRACE_MODULE_MAX_SEGMENTS; ++i) {
+            if (!mod.segments[i].memsz) continue;
             char buf[160];
-            snprintf(buf, sizeof(buf), "vita-tracy module %s nid=0x%08X seg=%u vaddr=0x%08X size=0x%X",
-                     mod.module_name, (unsigned)mod.module_nid, (unsigned)i,
+            snprintf(buf, sizeof(buf), "vita-tracy module %.*s nid=0x%08X seg=%u vaddr=0x%08X size=0x%X",
+                     (int)sizeof(mod.module_name), mod.module_name, (unsigned)mod.module_nid, (unsigned)i,
                      (unsigned)mod.segments[i].vaddr, (unsigned)mod.segments[i].memsz);
             TracyMessage(buf, strlen(buf));
             /* AppInfo is deferred across on-demand connections; an initial

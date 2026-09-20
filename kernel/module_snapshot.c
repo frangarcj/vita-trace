@@ -15,7 +15,7 @@ int vita_tracy_modules_snapshot(VitaTracyKernelState *st, SceUID pid) {
     SceSize count = VITA_TRACY_MAX_MODULES;
 
     int ret = vita_tracy_fw_module_list(pid, 0x7FFFFFFF, 1, modids, &count);
-    if (ret < 0) {
+    if (ret < 0 || count > VITA_TRACY_MAX_MODULES) {
         return VITA_TRACY_ERROR_ARGS;
     }
 
@@ -35,6 +35,8 @@ int vita_tracy_modules_snapshot(VitaTracyKernelState *st, SceUID pid) {
         record.type = VITA_TRACE_MODULE_SNAPSHOT;
         record.timestamp = now;
         record.payload.module_snapshot.pid = (uint32_t)pid;
+        /* GetModuleInfo has no module NID field. Leave it explicitly unknown
+         * rather than confusing the process-local module UID with a NID. */
         strncpy(record.payload.module_snapshot.module_name, info.module_name,
                           VITA_TRACE_MODULE_NAME_MAX - 1);
 
@@ -43,11 +45,13 @@ int vita_tracy_modules_snapshot(VitaTracyKernelState *st, SceUID pid) {
             if (info.segments[seg].memsz == 0) {
                 continue;
             }
-            record.payload.module_snapshot.segments[segment_count].vaddr =
+            /* Preserve the original segment ordinal for ELF PT_LOAD lookup;
+             * omitting empty slots must not renumber the remaining segments. */
+            record.payload.module_snapshot.segments[seg].vaddr =
                 (uint32_t)(uintptr_t)info.segments[seg].vaddr;
-            record.payload.module_snapshot.segments[segment_count].memsz = info.segments[seg].memsz;
-            record.payload.module_snapshot.segments[segment_count].perm = info.segments[seg].perms;
-            segment_count++;
+            record.payload.module_snapshot.segments[seg].memsz = info.segments[seg].memsz;
+            record.payload.module_snapshot.segments[seg].perm = info.segments[seg].perms;
+            segment_count = seg + 1;
         }
         record.payload.module_snapshot.segment_count = segment_count;
 

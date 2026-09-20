@@ -2,6 +2,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <map>
 #include <mutex>
@@ -181,6 +182,26 @@ TEST_CASE_FIXTURE(Fixture, "bridge retains private stats payload after a failed 
     CHECK(stats.uptime_ms == 999);
     REQUIRE(vita_tracy_kernel_get_stats(&stats) == 0);
     CHECK(stats.uptime_ms == 2);
+}
+
+TEST_CASE_FIXTURE(Fixture, "bridge preserves sparse segment labels and bounds unterminated module names") {
+    REQUIRE(vita_tracy_kernel_attach(8, 8) == 0);
+    VitaTraceControlRecord record{};
+    record.type = VITA_TRACE_MODULE_SNAPSHOT;
+    auto &module = record.payload.module_snapshot;
+    std::memset(module.module_name, 'A', sizeof(module.module_name));
+    module.segment_count = 3;
+    module.segments[0] = {0x81230000u, 0x1000u, 5u};
+    module.segments[2] = {0x90000000u, 0x2000u, 6u};
+    REQUIRE(vita_trace_ring_try_push(vita_trace_shared_control_ring(runtime->memory), &record));
+    REQUIRE(vitaTracyWakeup() == 0);
+    REQUIRE(vita_tracy_kernel_detach_checked() == 0);
+    REQUIRE(runtime->messages.size() == 2);
+    const auto prefix = "vita-tracy module " + std::string(sizeof(module.module_name), 'A') + " nid=";
+    CHECK(runtime->messages[0].find(prefix) == 0);
+    CHECK(runtime->messages[0].find("seg=0 ") != std::string::npos);
+    CHECK(runtime->messages[1].find("seg=2 ") != std::string::npos);
+    CHECK(runtime->messages[1].find("vaddr=0x90000000") != std::string::npos);
 }
 TEST_CASE_FIXTURE(Fixture, "bridge failed join cannot release memory still reachable by its worker") {
     REQUIRE(vita_tracy_kernel_attach(8, 8) == 0);

@@ -189,6 +189,19 @@ target_link_libraries(vita_tracy_bridge_tests PRIVATE doctest::doctest)
 target_compile_features(vita_tracy_bridge_tests PRIVATE cxx_std_17)
 doctest_discover_tests(vita_tracy_bridge_tests PROPERTIES TIMEOUT 20)
 
+add_executable(vita_tracy_module_tests
+    main.cpp module_snapshot_test.cpp
+    ${VITA_TRACY_SOURCE_DIR}/kernel/module_snapshot.c
+)
+target_include_directories(vita_tracy_module_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/fakes
+    ${VITA_TRACY_SOURCE_DIR}/include
+    ${VITA_TRACY_SOURCE_DIR}/kernel
+)
+target_link_libraries(vita_tracy_module_tests PRIVATE doctest::doctest)
+target_compile_features(vita_tracy_module_tests PRIVATE cxx_std_17)
+doctest_discover_tests(vita_tracy_module_tests)
+
 add_executable(vita_tracy_firmware_tests
     main.cpp firmware_exports_test.cpp
     ${VITA_TRACY_SOURCE_DIR}/kernel/firmware_exports.c
