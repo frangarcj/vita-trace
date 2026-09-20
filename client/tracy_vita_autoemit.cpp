@@ -1,19 +1,19 @@
 #include <cstdio>
 #include <cstring>
-#include <mutex>
+#include "tracy_vita_lock.hpp"
 #include <tracy/Tracy.hpp>
 #if VITA_TRACY_AUTO_FRAMES
 #include <psp2/display.h>
 #endif
 
 namespace {
-std::mutex emission_mutex;
+pthread_mutex_t emission_mutex = PTHREAD_MUTEX_INITIALIZER;
 bool active = false;
 }
 
 extern "C" void vita_tracy_auto_activate(int enabled) {
     // Closing waits for any in-flight frame emission before Tracy is destroyed.
-    std::lock_guard<std::mutex> lock(emission_mutex);
+    VitaTracyLockGuard lock(&emission_mutex);
     active = enabled != 0;
 }
 
@@ -28,7 +28,7 @@ extern "C" int __real_sceDisplaySetFrameBuf(const SceDisplayFrameBuf *, SceDispl
 extern "C" int __wrap_sceDisplaySetFrameBuf(const SceDisplayFrameBuf *frame, SceDisplaySetBufSync sync) {
     const int ret = __real_sceDisplaySetFrameBuf(frame, sync);
     if (ret >= 0 && frame && frame->base) {
-        std::lock_guard<std::mutex> lock(emission_mutex);
+        VitaTracyLockGuard lock(&emission_mutex);
         if (active) FrameMarkNamed("Vita display submit");
     }
     return ret;
