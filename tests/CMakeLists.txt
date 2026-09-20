@@ -35,12 +35,27 @@ target_compile_features(vita_tracy_tests PRIVATE cxx_std_17)
 include(${doctest_SOURCE_DIR}/scripts/cmake/doctest.cmake)
 doctest_discover_tests(vita_tracy_tests)
 
+# Exercise the real timer lifecycle code against deterministic failure
+# injection. This validates control flow, not interrupt behavior on hardware.
+add_executable(vita_tracy_timer_tests
+    main.cpp tick_source_test.cpp
+    ${VITA_TRACY_SOURCE_DIR}/kernel/tick_source.c
+)
+target_include_directories(vita_tracy_timer_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/fakes
+    ${VITA_TRACY_SOURCE_DIR}/include
+    ${VITA_TRACY_SOURCE_DIR}/kernel
+)
+target_link_libraries(vita_tracy_timer_tests PRIVATE doctest::doctest)
+target_compile_features(vita_tracy_timer_tests PRIVATE cxx_std_17)
+doctest_discover_tests(vita_tracy_timer_tests)
+
 # The offline symbolication tool is host-side Python; its tests run in the
 # same suite so a change there fails the build like any other.
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
     add_test(NAME symbol_map
-        COMMAND ${Python3_EXECUTABLE} -m unittest discover -s ${CMAKE_SOURCE_DIR}/tools -p "test_*.py"
+        COMMAND ${Python3_EXECUTABLE} -B -m unittest discover -s ${CMAKE_SOURCE_DIR}/tools -p "test_*.py"
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/tools
     )
 else()

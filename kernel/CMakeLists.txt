@@ -6,6 +6,7 @@ add_executable(tracy_kernel
     sampler_debug_fallback.c
     sampler_pamgr.c
     service.c
+    tick_source.c
     ${VITA_TRACY_SOURCE_DIR}/common/shared_layout.c
     ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
     state.c
@@ -42,6 +43,7 @@ target_link_libraries(tracy_kernel
     SceSysclibForDriver_stub
     SceSysmemForDriver_stub
     SceThreadmgrForDriver_stub
+    SceSystimerForDriver_stub
     ${VITA_TRACY_MODULEMGR_STUB}
 )
 

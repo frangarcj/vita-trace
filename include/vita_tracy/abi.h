@@ -7,6 +7,7 @@ extern "C" {
 #endif
 
 #define VITA_TRACY_ABI_VERSION 1u
+#define VITA_TRACY_MAX_SAMPLE_HZ 1000u
 
 /* Every request struct starts with size + abi_version so the receiver can
  * reject mismatched builds instead of misreading fields. */
