@@ -9,9 +9,9 @@ optional kernel plugin through shared rings, so the hot path never makes a
 syscall per event.
 
 > **Status:** early bring-up. Zones/frames have been captured on hardware.
-> The ABI-2 event-driven bridge and timer-driven suspension diagnostic are
-> built and host-tested, but not yet hardware-validated. Non-intrusive PC
-> sampling remains unimplemented. See `docs/implementation.md` and
+> The ABI-3 event-driven bridge, per-core timer-IRQ PMU capture and automatic
+> link-time integration are built and host-tested, but not hardware-validated.
+> Non-intrusive PC sampling remains unimplemented. See `docs/implementation.md` and
 > [sampling modes and limitations](docs/sampling.md).
 
 ## Layout
@@ -50,7 +50,27 @@ harmless. For firmware 3.63 and later, add `-DVITA_TRACY_FIRMWARE=363`.
 
 ## Using it
 
-Link `tracy_vita` and instrument with the normal Tracy API:
+For an existing executable, enable the client without editing its source:
+
+```cmake
+add_subdirectory(path/to/vita-trace)
+vita_tracy_enable(my_homebrew FRAMES)
+```
+
+Add `PMU` to attach the backend and collect whole-core counters automatically:
+
+```cmake
+vita_tracy_enable(my_homebrew PMU FRAMES PMU_HZ 100 CORE_MASK 7)
+```
+
+These are alternative calls, not two calls for the same target. **The PMU
+mode requires the matching kernel plugin loaded before launching the HB.**
+It links strong imports and never probes an unresolved weak import. `FRAMES`
+marks successful display submissions, not GPU duration. See
+[automatic integration](docs/automatic.md) for deployment and lifetime
+limits. This is not yet uninstrumented function-level PC sampling.
+
+For manual lifetime and zones, link `tracy_vita` and use the normal Tracy API:
 
 When included with `add_subdirectory`, sample applications default to off:
 
@@ -88,10 +108,12 @@ Use `--elf ModuleName=path` for each module in a multi-module capture. The
 tool reconstructs ELF virtual addresses from runtime segment placements;
 it does not assume the executable was linked at zero.
 
-ABI 2 requires reinstalling the rebuilt kernel plugin and application
+ABI 3 requires reinstalling the rebuilt kernel plugin and application
 together. Timer-driven suspension diagnostics require explicit
 `VITA_TRACY_SAMPLING_ALLOW_SUSPEND` opt-in; a normal nonzero sampling request
 returns unsupported until a real interrupted-PC source is implemented.
+See [hardware validation and bisecting](docs/hardware-validation.md) before
+testing the new kernel paths on a console.
 
 ## License
 

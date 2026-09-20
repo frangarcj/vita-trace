@@ -1,4 +1,4 @@
-# Sampling and transport (ABI 2)
+# Sampling and transport (ABI 3)
 
 ## What this revision changes
 
@@ -53,7 +53,7 @@ The provisional diagnostic is explicitly opt-in:
 #include "vita_tracy/abi.h"
 #include "vita_tracy/client.h"
 
-// Only after the matching ABI-2 plugin is known to be loaded.
+// Only after the matching ABI-3 plugin is known to be loaded.
 int attached = vita_tracy_kernel_attach(0, 0);
 if (attached == 0) {
     int result = vita_tracy_kernel_set_sampling_ex(
@@ -72,14 +72,52 @@ is transport, not evidence that the target ran on CPU 0. A resume failure
 increments a counter and stops further scans; it may require a restart of
 the target. The two modes must remain distinct in future backends.
 
-The existing experimental PMU reader in `kernel/pmu.c` is separate. Its
-10 ms delay loop, per-core expansion, coherent snapshots and PMU-to-Tracy
-event forwarding have not been replaced by this revision.
+## Whole-core PMU capture from timer interrupts
+
+The legacy `kernel/pmu.c` experiment has been replaced by
+`kernel/pmu_session.c`, `kernel/pmu_arm.c` and `common/pmu_core.c`. Each selected
+core gets a system timer and a separate SPSC PMU ring. Its IRQ callback reads
+the bank on that same core, stores a fixed-size vector with timestamp and
+actual elapsed microseconds, and signals the consumer. It never enumerates
+or suspends application threads and never enables userland PMU access.
+
+Short-lived pinned jobs perform acquisition/restoration with local IRQs
+disabled. There is no resident PMU polling thread or diagnostic busy loop.
+Defaults are app cores 0..2 at 100 Hz, cycle-only unless events are configured;
+the automatic CMake mode explicitly configures six events. CPU 3 is opt-in.
+The IRQ checks its actual core before touching CP15 or its SPSC ring.
+
+The PMU must be unused (counter and interrupt enables clear) before acquisition.
+The backend saves disabled counter values/types, selector and control state,
+checks observable ownership before reads/restoration, and retains live handles
+when cleanup cannot complete. This is not a lock respected by other plugins:
+another writer using the exact same configuration is not detectable. No claim
+of arbitrary PMU sharing or scheduler virtualization is made.
+
+Tracy receives timestamped whole-core cycles/events per second using each
+record's actual interval, not its drain time or an assumed 10 ms period.
+0x68 means renamed instructions, not retired instructions. Values include
+other processes, the kernel and this profiler on that core. The counter bank
+continues running during sequential register reads; the vector is not a
+hardware-latched simultaneous snapshot.
+
+The first callback establishes a baseline. Backward/zero time and excessive
+intervals are marked as gaps rather than invented zero work. Ring overflow
+drops the new record, increments losses and leaves a sequence gap. A counter
+ownership failure disables that core's reader, clears its active-mask bit
+and records the error; starting an unhealthy running session does not return
+success. Stop and retry explicitly after diagnosing the conflict.
+
+On stop, callback admission closes before resources are freed. A callback
+already running makes cleanup return busy and retain its timer, ring and
+PMU state for retry. Timer teardown must be validated on hardware before
+claiming safe unload. The host tests exercise this state machine but cannot
+prove that the firmware's timer-free function has the assumed IRQ semantics.
 
 ## Compatibility and lifetime
 
 Rebuild the client, kernel plugin and sample applications together. The
-shared/control ABI is now version 2 and the exported library version is 25.
+shared/control ABI is now version 3 and the exported library version is 25.
 Do not run a new client against an old plugin or vice versa.
 
 Weak imports allow an application to load without the plugin; they do not
@@ -93,6 +131,15 @@ The application must stop producing Tracy zones before shutting down Tracy.
 if detachment fails. `vita_tracy_kernel_detach_checked` reports that failure
 for callers that need to handle it. Stop and join producers before releasing
 shared memory; do not free on an unconfirmed unregister operation.
+
+`vita_tracy_shutdown_checked` reports a failed detach or optional-module
+unload. Repeated initialization does not change a live profiler's timebase.
+Bridge commands retain their own payload until completion; an interrupted
+or failed wait does not make a caller's stack pointer available to a worker.
+Failed thread joins/deletions, semaphore deletions and memblock frees retain
+their handles, and callers can retry checked detach. Normal application
+workers must still be stopped before shutdown. Do not unload the kernel
+provider while any process still uses its imports or has a call in flight.
 
 ## Offline symbols
 
@@ -131,6 +178,12 @@ when VitaSDK is on PATH, layout bounds and the actual timer lifecycle code
 against fake APIs with failure injection. Fake timer tests cover retained
 notifications, coalesced ticks, stop wakeups, startup rollback and failed
 release. They do not establish interrupt behavior on a real console.
+
+PMU tests cover occupied banks, preservation, ownership loss, wrong-core
+callbacks, partial acquisition/rollback, failed setup jobs, ring overflow
+and pending process cleanup. Bridge tests run the actual consumer/control
+code with a host worker thread and inject wait/join/delete/free failures.
+See `docs/hardware-validation.md` for the remaining console acceptance gates.
 
 The synthetic sample now runs work in `main`, a `std::thread`, native workers
 and a sleeping thread. Its loops are non-inlined and use volatile local

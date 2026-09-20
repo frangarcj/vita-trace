@@ -1,22 +1,28 @@
 # Implementation status
 
 The original zones/frames path has run on a PS Vita and under Vita3K (see
-below). The ABI-2 bridge, explicit profiler-thread registry, timer-driven
-diagnostic and ELF resolver revision are built and host-tested, not yet
-validated on hardware. See `docs/sampling.md` for the precise boundaries.
+below). The ABI-3 bridge, per-core timer-IRQ PMU capture, explicit profiler
+thread registry, timer-driven diagnostic, automatic link-time integration
+and ELF resolver are built and host-tested, not yet validated on hardware.
+See `docs/sampling.md`, `docs/automatic.md` and `docs/hardware-validation.md`.
 
 ## Phase status
 
 | Phase | State | Notes |
 |---|---|---|
 | 0 — Bring-up | **Verified on hardware** | A retail console captured over Wi-Fi: 556 frames, 554 zones in 12 s, timings self-consistent. |
-| 1 — Kernel bridge | Built, ABI-2 hardware validation pending | Explicit profiler PUID registry, event-driven drain/control, shared-ring layout checks and serialized control producers. |
+| 1 — Kernel bridge | Built, ABI-3 hardware validation pending | Explicit profiler PUID registry, event-driven drain/control, separate PMU rings, retryable resource cleanup and serialized control operations. |
 | 2 — Provisional samples | Explicit diagnostic only | SceSysTimer wakes the suspend/read/resume worker. No name-based exclusions; main is no longer the bridge's control caller. These are not unbiased CPU-time samples. |
 | 3 — Non-intrusive sampling | Not implemented | SceSysTimer supplies cadence but no interrupted register frame. A validated IRQ-context/PC adapter under the normal scheduler remains necessary. The PTM investigation is recorded in `docs/reverse_engineering.md`; importing pamgr alone does not establish a RAM trace sink. |
-| 4 — PMU | Built, untested on hardware | Client-side ScePerf path is dead (PMUSERENR reads 0, ScePerf can't load). `kernel/pmu.c` now opens PMUSERENR and programs PMCR/PMCNTENSET/PMXEVTYPER directly via CP15, per core, using a `SceThreadmgrForDriver` NID (`0x5053B005`) reverse-engineered from `threadmgr.elf` — see `docs/reverse_engineering.md`. Loading `tracy_kernel.skprx` itself is now on-demand via taiHEN (`samples/bringup`), gated behind the same marker file, rather than a permanent `ux0:tai/config.txt` entry. |
-| 5 — Callstacks | Phase A only | Samples carry a single PC. LR, stack snapshots and offline unwinding are not implemented. |
+| 4 — PMU | Built and host-tested, no new hardware run | `kernel/pmu_session.c` reads cycles/events from per-core system-timer callbacks. Short pinned jobs acquire/restore registers; no resident polling thread or PMUSERENR writes. Timestamped whole-core deltas reach Tracy. |
+| 5 — Callstacks | Phase A only | The diagnostic record carries PC/SP/LR, but Tracy receives only one PC. Stack snapshots and offline unwinding are not implemented. |
 | 6 — GPU / Razor | Not started | — |
 | 7 — Uninstrumented agent | Not started | `agent/` is empty. |
+
+Link-time integration is available separately: `vita_tracy_enable(target
+PMU FRAMES)` wraps startup/exit and optional display submissions without
+source edits. It still requires rebuilding/relinking the HB, and does not
+make phase 3 or the injection agent complete.
 
 ## Decisions that departed from the design
 
@@ -40,10 +46,20 @@ timebase. CMake applies the patch idempotently at configure time.
 A second patch now adds POSIX worker lifecycle hooks, registering actual
 profiler thread IDs rather than excluding every application `pthread`.
 
-**PMU is still experimental.** The original ScePerf userland path is not
-usable on retail. The kernel CP15 bring-up and cycle reader are preserved;
-they are not a finished per-thread profiler. The ABI-2 timer/drain revision
-does not replace that separate reader or implement its Tracy event forwarding.
+**PMU collection now stays in kernel.** The former polling/PMUSERENR
+experiment is preserved in Git history, not the active backend. The current
+timer callbacks read whole-core counters through `kernel/pmu_arm.c` and the
+testable ownership/delta logic in `common/pmu_core.c`. It refuses an occupied
+PMU and avoids restoring over another owner's changed configuration. This
+does not virtualize counters per thread, prove hardware routing, or prevent
+all interference by non-cooperating plugins.
+
+**Failure does not imply cancellation.** The client keeps command payloads
+in private storage until completion, even after an unsuccessful wait. Failed
+joins/deletions/unmaps retain resource handles for retry. Process-exit
+requests are atomically tied to the target PID; control calls serialize
+without blocking on a reentrant process callback. These code paths are
+tested with fake platform APIs and real host threads, not a console kernel.
 
 **The kernel acknowledges the mapping.** The acknowledgement validates a
 completed registration, not module residency. An unresolved weak import is
@@ -60,13 +76,13 @@ an error instead of silently choosing a zero clock reference.
   rather than measurement.
 - Whether ScePerf and the kernel timebase drift apart over a long session,
   and how large the clock-sync error actually is.
-- How many PMU counters are programmable once a kernel module opens
-  PMUSERENR, and whether they survive context switches.
+- Timer availability and per-core IRQ routing; whether PMU configuration
+  survives helper-thread exit/context switches, and its actual overhead.
 - What high-resolution clock is reachable without ScePerf. The process timer
   works but is microseconds; the kernel plugin is the likely answer.
-- A non-intrusive sampling source. ScePamgr is absent from 3.60/3.65, so the
-  choice is between porting the 3.36 module forward and writing a scheduler
-  hook; see `docs/reverse_engineering.md`.
+- A validated interrupted-register adapter for non-intrusive PC sampling.
+  A scheduler hook alone would not sample a long-running thread between
+  context switches. See `docs/sampling.md` for the current API limitations.
 
 ## What the hardware run showed
 
