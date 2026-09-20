@@ -4,11 +4,17 @@
 #ifndef VITA_TRACY_AUTO_PMU
 #define VITA_TRACY_AUTO_PMU 0
 #endif
+#ifndef VITA_TRACY_AUTO_PC_SAMPLING
+#define VITA_TRACY_AUTO_PC_SAMPLING 0
+#endif
 #ifndef VITA_TRACY_AUTO_PMU_HZ
 #define VITA_TRACY_AUTO_PMU_HZ 100
 #endif
 #ifndef VITA_TRACY_AUTO_CORE_MASK
 #define VITA_TRACY_AUTO_CORE_MASK 7
+#endif
+#ifndef VITA_TRACY_AUTO_SAMPLE_HZ
+#define VITA_TRACY_AUTO_SAMPLE_HZ 100
 #endif
 
 extern int __real_main(int argc, char **argv);
@@ -37,10 +43,11 @@ int __wrap_main(int argc, char **argv) {
         cleanup_on_return = atexit(vita_tracy_auto_stop) != 0;
         vita_tracy_auto_report("startup", 0);
         if (cleanup_on_return) vita_tracy_auto_report("atexit registration", -1);
-#if VITA_TRACY_AUTO_PMU
+#if VITA_TRACY_AUTO_PMU || VITA_TRACY_AUTO_PC_SAMPLING
         int ret = vita_tracy_kernel_attach(0, 0);
         vita_tracy_auto_report("kernel attach", ret);
         if (ret == 0) {
+#if VITA_TRACY_AUTO_PMU
             VitaTracyPmuConfig cfg = {0};
             cfg.size = sizeof(cfg);
             cfg.abi_version = VITA_TRACY_ABI_VERSION;
@@ -58,6 +65,11 @@ int __wrap_main(int argc, char **argv) {
                 ret = vita_tracy_kernel_pmu_sample_start();
                 vita_tracy_auto_report("PMU start", ret);
             }
+#elif VITA_TRACY_AUTO_PC_SAMPLING
+            ret = vita_tracy_kernel_set_sampling_ex(
+                VITA_TRACY_AUTO_SAMPLE_HZ, VITA_TRACY_SAMPLING_PMU_IRQ);
+            vita_tracy_auto_report("PC sampling", ret);
+#endif
         }
 #endif
         vita_tracy_auto_activate(1);

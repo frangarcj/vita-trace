@@ -112,11 +112,27 @@ foreach(_mode IN ITEMS 0 1)
         ${VITA_TRACY_SOURCE_DIR}/client/tracy_vita_autostart.c
     )
     target_include_directories(vita_tracy_autostart_${_mode}_tests PRIVATE ${VITA_TRACY_SOURCE_DIR}/include)
-    target_compile_definitions(vita_tracy_autostart_${_mode}_tests PRIVATE VITA_TRACY_AUTO_PMU=${_mode})
+    target_compile_definitions(vita_tracy_autostart_${_mode}_tests PRIVATE
+        VITA_TRACY_AUTO_PMU=${_mode}
+        VITA_TRACY_AUTO_PC_SAMPLING=0
+    )
     target_link_libraries(vita_tracy_autostart_${_mode}_tests PRIVATE doctest::doctest)
     target_compile_features(vita_tracy_autostart_${_mode}_tests PRIVATE cxx_std_17)
     doctest_discover_tests(vita_tracy_autostart_${_mode}_tests TEST_PREFIX "bootstrap.${_mode}.")
 endforeach()
+
+add_executable(vita_tracy_autostart_pc_tests
+    main.cpp autostart_test.cpp
+    ${VITA_TRACY_SOURCE_DIR}/client/tracy_vita_autostart.c
+)
+target_include_directories(vita_tracy_autostart_pc_tests PRIVATE ${VITA_TRACY_SOURCE_DIR}/include)
+target_compile_definitions(vita_tracy_autostart_pc_tests PRIVATE
+    VITA_TRACY_AUTO_PMU=0
+    VITA_TRACY_AUTO_PC_SAMPLING=1
+)
+target_link_libraries(vita_tracy_autostart_pc_tests PRIVATE doctest::doctest)
+target_compile_features(vita_tracy_autostart_pc_tests PRIVATE cxx_std_17)
+doctest_discover_tests(vita_tracy_autostart_pc_tests TEST_PREFIX "bootstrap.pc.")
 
 add_executable(vita_tracy_autoframe_tests
     main.cpp autoframe_test.cpp
