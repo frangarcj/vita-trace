@@ -57,7 +57,8 @@ static void fail_reader(PmuCpu *cpu, int error) {
     cpu->failed = 1;
     __atomic_fetch_and(&cpu->state->stats.pmu_active_mask, ~(1u << cpu->cpu), __ATOMIC_RELEASE);
     record_error(cpu->state, error);
-    vita_tracy_notify(cpu->state);
+    vita_tracy_notify_events(cpu->state, error == VITA_TRACY_ERROR_CPU ?
+        VITA_TRACY_WAKE_PMU_CPU(cpu->cpu) : VITA_TRACY_WAKE_PMU_COUNTER(cpu->cpu));
 }
 
 /* The timer owns this core's only PMU producer. No user-memory lookup, thread

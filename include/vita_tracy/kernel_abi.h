@@ -31,8 +31,16 @@ int vitaTracySetPmu(const VitaTracyPmuConfig *cfg);
 int vitaTracySnapshotModules(uint32_t target_pid);
 int vitaTracyGetStats(VitaTracyStats *stats);
 
+/* Positive wake bits; PMU failure bits are independent of potentially full
+ * sample/control rings. A wake may contain more than one core's failure. */
+#define VITA_TRACY_WAKE_DATA 1u
+#define VITA_TRACY_WAKE_PMU_CPU(cpu) (1u << (4u + (cpu)))
+#define VITA_TRACY_WAKE_PMU_COUNTER(cpu) (1u << (8u + (cpu)))
+#define VITA_TRACY_WAKE_ALL 0xFF1u
+
 /* One consumer waits for published batches. Notifications are retained
  * when they arrive before the wait; wake is also used for control requests.
+ * Returns a nonnegative VITA_TRACY_WAKE_* bit mask or a negative error.
  * timeout_us == 0 waits indefinitely. Only the attached process may call. */
 int vitaTracyWaitForData(uint32_t timeout_us);
 int vitaTracyWakeup(void);

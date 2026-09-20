@@ -91,6 +91,16 @@ and reports `VITA_TRACY_ERROR_CPU`. It does not touch the wrong core's bank,
 silently recover on a later tick, or stop the other healthy readers. Stop
 and restart explicitly once the routing problem has been diagnosed.
 
+PMU routing/counter failures also set retained wake bits, independently of
+sample/control ring capacity. `vitaTracyWaitForData` now returns a nonnegative
+`VITA_TRACY_WAKE_*` mask on success (not necessarily zero). The bridge turns
+failure bits into Tracy messages and deferred AppInfo on its ordinary worker;
+it does not log from the IRQ or poll `GetStats`. Detailed error counters remain
+available through the stats API. A wake can coalesce failures from several
+cores; it is not a count of occurrences. Unconsumed notifications are discarded
+when the old session is replaced, not delivered to a new target. Process death
+or shutdown before the worker consumes an event can still prevent delivery.
+
 The PMU must be unused (counter and interrupt enables clear) before acquisition.
 The backend saves disabled counter values/types, selector and control state,
 checks observable ownership before reads/restoration, and retains live handles

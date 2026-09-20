@@ -23,6 +23,7 @@ struct Fake {
     int core = 0, next_job = 20, notifications = 0, reads = 0;
     int fail_prepare = -1, fail_arm = -1, fail_start = -1, fail_join = -1, wrong_job = -1;
     int busy_timer = -1, fail_delete = -1;
+    uint32_t wake_events = 0;
     uint64_t now = 10000;
     std::array<Bank, 4> banks;
     std::array<VitaTracyTickSource *,4> timers{};
@@ -95,6 +96,10 @@ SceKernelIntrStatus ksceKernelCpuSuspendIntr(void) { return 1; }
 SceKernelIntrStatus ksceKernelCpuResumeIntr(SceKernelIntrStatus v) { return v; }
 uint64_t vita_tracy_kernel_now(void) { return fake.now; }
 void vita_tracy_notify(VitaTracyKernelState *) { ++fake.notifications; }
+void vita_tracy_notify_events(VitaTracyKernelState *, uint32_t events) {
+    ++fake.notifications;
+    fake.wake_events |= events;
+}
 SceUID ksceKernelCreateThread(const char *, SceKernelThreadEntry entry, int, SceSize, unsigned,
                               int affinity, const void *) {
     unsigned core = 0;
@@ -205,6 +210,7 @@ TEST_CASE_FIXTURE(Fixture, "PMU wrong-core callbacks do not read counters or cor
     CHECK(state.stats.pmu_active_mask == 5);
     CHECK(state.stats.pmu_last_error == VITA_TRACY_ERROR_CPU);
     CHECK(fake.notifications == 1);
+    CHECK(fake.wake_events == VITA_TRACY_WAKE_PMU_CPU(1));
     CHECK(vita_tracy_pmu_sample_start(&state) == VITA_TRACY_ERROR_STATE);
     tick(1); // A later correctly routed tick must not silently recover a failed reader.
     CHECK(fake.reads == reads);
@@ -237,6 +243,7 @@ TEST_CASE_FIXTURE(Fixture, "PMU counter ownership changes stop that core instead
     fake.banks[0].types[0] = 0x60;
     tick(0);
     CHECK(state.stats.pmu_counter_errors[0] == 1);
+    CHECK(fake.wake_events == VITA_TRACY_WAKE_PMU_COUNTER(0));
     CHECK(state.stats.pmu_active_mask == 6);
     CHECK(vita_tracy_pmu_sample_start(&state) == VITA_TRACY_ERROR_STATE);
     int reads = fake.reads; tick(0); CHECK(fake.reads == reads);
@@ -314,4 +321,18 @@ TEST_CASE_FIXTURE(Fixture, "PMU ring overflow drops rather than overwriting and 
     REQUIRE(vita_trace_ring_try_pop(ring, &sample));
     CHECK(sample.sequence == VITA_TRACE_PMU_RING_CAPACITY + 3);
     CHECK(sample.cycles == 100); CHECK(sample.elapsed_us == 10000);
+}
+
+TEST_CASE_FIXTURE(Fixture, "PMU failures bypass a full ring and retain multiple core failure bits") {
+    REQUIRE(vita_tracy_pmu_sample_start(&state) == 0);
+    void *ring = vita_trace_shared_pmu_ring(memory.data(), 0);
+    VitaTracePmuSample sample{};
+    for (unsigned i = 0; i < VITA_TRACE_PMU_RING_CAPACITY; ++i)
+        REQUIRE(vita_trace_ring_try_push(ring, &sample));
+    fake.banks[0].types[0] = 0x60;
+    tick(0);
+    tick(1, 0);
+    CHECK(vita_trace_ring_pending(ring) == VITA_TRACE_PMU_RING_CAPACITY);
+    CHECK(fake.wake_events == (VITA_TRACY_WAKE_PMU_COUNTER(0) | VITA_TRACY_WAKE_PMU_CPU(1)));
+    CHECK(state.stats.pmu_active_mask == 4);
 }

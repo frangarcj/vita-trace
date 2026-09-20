@@ -50,6 +50,7 @@ uint64_t vita_tracy_kernel_now(void);
 void vita_tracy_emit_sample(VitaTracyKernelState *st, uint32_t cpu, const VitaTraceSample *sample);
 void vita_tracy_emit_control(VitaTracyKernelState *st, const VitaTraceControlRecord *record);
 void vita_tracy_notify(VitaTracyKernelState *st);
+void vita_tracy_notify_events(VitaTracyKernelState *st, uint32_t events);
 
 /* Releases the mapping and stops sampling. Safe to call repeatedly and
  * from the process-death path. */

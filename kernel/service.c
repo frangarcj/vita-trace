@@ -93,7 +93,11 @@ void vita_tracy_emit_control(VitaTracyKernelState *st, const VitaTraceControlRec
 }
 
 void vita_tracy_notify(VitaTracyKernelState *st) {
-    if (st->data_event > 0) ksceKernelSetEventFlag(st->data_event, 1u);
+    vita_tracy_notify_events(st, VITA_TRACY_WAKE_DATA);
+}
+
+void vita_tracy_notify_events(VitaTracyKernelState *st, uint32_t events) {
+    if (st->data_event > 0) ksceKernelSetEventFlag(st->data_event, events & VITA_TRACY_WAKE_ALL);
 }
 
 int vitaTracyWakeup(void) {
@@ -117,9 +121,10 @@ int vitaTracyWaitForData(uint32_t timeout_us) {
     if (vita_trace_control_target(&st->control) == (uint32_t)ksceKernelGetProcessId()) {
         unsigned int bits = 0;
         SceUInt timeout = timeout_us;
-        ret = ksceKernelWaitEventFlag(st->data_event, 1u,
+        ret = ksceKernelWaitEventFlag(st->data_event, VITA_TRACY_WAKE_ALL,
             SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
             &bits, timeout_us ? &timeout : NULL);
+        if (ret >= 0) ret = (int)(bits & VITA_TRACY_WAKE_ALL);
     }
     EXIT_SYSCALL(syscall_state);
     return ret;
@@ -207,6 +212,11 @@ static int vitaTracyRegister_impl(const VitaTracyRegisterArgs *args) {
     if (st->state != VITA_TRACY_STATE_READY) {
         return VITA_TRACY_ERROR_STATE;
     }
+
+    /* No old producer remains after detach. Do not deliver the previous
+     * target's retained failures to a newly attached process. */
+    int event_ret = ksceKernelClearEventFlag(st->data_event, 0);
+    if (event_ret < 0) return event_ret;
 
     void *kernel_page = NULL;
     SceSize kernel_size = 0;

@@ -5,6 +5,8 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <string>
+#include <vector>
 #include <psp2/kernel/threadmgr.h>
 #include "vita_tracy/client.h"
 #include "vita_tracy/kernel_abi.h"
@@ -19,7 +21,9 @@ struct Runtime {
     std::thread worker;
     SceKernelThreadEntry entry = nullptr;
     void *memory = nullptr;
-    bool registered = false, event = false, started = false;
+    bool registered = false, started = false;
+    uint32_t events = 0, start_events = 0;
+    std::vector<std::string> messages;
     bool fail_wait = false, fail_join = false, fail_delete = false, fail_sema = false, fail_free = false;
     bool fail_start = false, block_stats = false, stats_entered = false, stats_completed = false;
     int tokens = 0, joins = 0, deletes = 0, frees = 0, stats_calls = 0;
@@ -43,7 +47,11 @@ struct Fixture {
 };
 bool consume(bool &flag) { bool ret = flag; flag = false; return ret; }
 }
-void test_tracy_app_info(const char *, std::size_t) {}
+void test_tracy_app_info(const char *text, std::size_t size) {
+    std::lock_guard<std::mutex> lock(runtime->mutex);
+    runtime->messages.emplace_back(text, size);
+    runtime->cv.notify_all();
+}
 void test_tracy_frame_mark(const char *) {}
 
 extern "C" {
@@ -69,6 +77,7 @@ SceUID sceKernelCreateThread(const char *, SceKernelThreadEntry entry, int, SceS
 int sceKernelStartThread(SceUID, SceSize size, void *args) {
     if (consume(runtime->fail_start)) return -45;
     runtime->started = true;
+    runtime->events |= runtime->start_events;
     runtime->worker = std::thread([=] { runtime->entry(size, args); });
     return 0;
 }
@@ -114,12 +123,13 @@ int vitaTracyUnregister(uint32_t) {
 }
 int vitaTracyWakeup(void) {
     std::lock_guard<std::mutex> lock(runtime->mutex);
-    runtime->event = true; runtime->cv.notify_all(); return 0;
+    runtime->events |= VITA_TRACY_WAKE_DATA; runtime->cv.notify_all(); return 0;
 }
 int vitaTracyWaitForData(uint32_t) {
     std::unique_lock<std::mutex> lock(runtime->mutex);
-    runtime->cv.wait(lock, [&] { return runtime->event; });
-    runtime->event = false; return 0;
+    runtime->cv.wait(lock, [&] { return runtime->events != 0; });
+    const auto events = runtime->events;
+    runtime->events = 0; return (int)events;
 }
 int vitaTracySetSampling(const VitaTracySamplingConfig *) { return 0; }
 int vitaTracySetPmu(const VitaTracyPmuConfig *) { return 0; }
@@ -192,4 +202,37 @@ TEST_CASE_FIXTURE(Fixture, "bridge preserves a failed startup handle when rollba
     CHECK(runtime->joins == 0); CHECK(runtime->frees == 0);
     REQUIRE(vita_tracy_kernel_detach_checked() == 0);
     CHECK(runtime->joins == 0); CHECK(runtime->deletes == 1); CHECK(runtime->frees == 1);
+}
+
+TEST_CASE_FIXTURE(Fixture, "bridge reports retained PMU failures before the first wait without polling stats") {
+    runtime->start_events = VITA_TRACY_WAKE_PMU_CPU(1) | VITA_TRACY_WAKE_PMU_COUNTER(2);
+    REQUIRE(vita_tracy_kernel_attach(8, 8) == 0);
+    std::unique_lock<std::mutex> lock(runtime->mutex);
+    REQUIRE(runtime->cv.wait_for(lock, std::chrono::seconds(5), [&] { return runtime->messages.size() == 2; }));
+    CHECK(runtime->messages[0].find("c1 reader stopped: IRQ routed to wrong CPU") != std::string::npos);
+    CHECK(runtime->messages[1].find("c2 reader stopped: counter access or ownership failure") != std::string::npos);
+    CHECK(runtime->stats_calls == 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "bridge remains usable after receiving asynchronous PMU failure bits") {
+    REQUIRE(vita_tracy_kernel_attach(8, 8) == 0);
+    {
+        std::unique_lock<std::mutex> lock(runtime->mutex);
+        runtime->events |= VITA_TRACY_WAKE_DATA | VITA_TRACY_WAKE_PMU_CPU(0);
+        runtime->cv.notify_all();
+        REQUIRE(runtime->cv.wait_for(lock, std::chrono::seconds(5), [&] { return !runtime->messages.empty(); }));
+    }
+    VitaTracyStats stats{};
+    stats.size = sizeof(stats); stats.abi_version = VITA_TRACY_ABI_VERSION;
+    REQUIRE(vita_tracy_kernel_get_stats(&stats) == 0);
+    CHECK(stats.uptime_ms == 1);
+    REQUIRE(vita_tracy_kernel_detach_checked() == 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "bridge data-only wakes do not manufacture PMU failure messages") {
+    runtime->start_events = VITA_TRACY_WAKE_DATA;
+    REQUIRE(vita_tracy_kernel_attach(8, 8) == 0);
+    REQUIRE(vita_tracy_kernel_detach_checked() == 0);
+    CHECK(runtime->messages.empty());
+    CHECK(runtime->stats_calls == 0);
 }

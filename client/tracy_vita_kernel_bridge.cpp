@@ -146,6 +146,22 @@ void EmitControl(const VitaTraceControlRecord &record) {
     }
 }
 
+void EmitWakeStatus(uint32_t events) {
+    for (uint32_t cpu = 0; cpu < VITA_TRACE_CORE_COUNT; ++cpu) {
+        const char *reasons[] = {"IRQ routed to wrong CPU", "counter access or ownership failure"};
+        const uint32_t masks[] = {VITA_TRACY_WAKE_PMU_CPU(cpu), VITA_TRACY_WAKE_PMU_COUNTER(cpu)};
+        for (uint32_t i = 0; i < 2; ++i) {
+            if (!(events & masks[i])) continue;
+            char text[160];
+            snprintf(text, sizeof(text), "vita-tracy PMU c%u reader stopped: %s; explicit stop/restart required",
+                     (unsigned)cpu, reasons[i]);
+            TracyMessage(text, strlen(text));
+            // Preserve failures for a viewer that connects after the IRQ stopped.
+            TracyAppInfo(text, strlen(text));
+        }
+    }
+}
+
 bool DrainBatch() {
         bool remaining = false;
         void *control = vita_trace_shared_control_ring(g_bridge.shared);
@@ -240,6 +256,7 @@ int DrainThread(SceSize args, void *argp) {
         /* A retained event bit covers the drain-to-wait race, including a
          * command posted just before this blocking syscall. No idle polling. */
         const int ret = vitaTracyWaitForData(0);
+        if (ret >= 0) EmitWakeStatus((uint32_t)ret);
         if (ret < 0) {
             g_bridge.command_result.store(ret, std::memory_order_release);
             g_bridge.draining.store(false, std::memory_order_release);
