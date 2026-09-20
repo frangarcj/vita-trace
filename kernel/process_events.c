@@ -11,10 +11,6 @@
 
 static void release_if_target(SceUID pid) {
     VitaTracyKernelState *st = vita_tracy_state();
-    if (st->target_pid == 0 || pid != st->target_pid) {
-        return;
-    }
-
     vita_tracy_target_exited(st, pid);
 }
 

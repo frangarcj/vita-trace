@@ -1,6 +1,8 @@
 #include "vita_tracy/control_gate.h"
 #include "vita_tracy/kernel_abi.h"
 
+#define CLEANUP_REQUESTED 0x80000000u
+
 int vita_trace_control_enter(VitaTraceControlGate *gate) {
     uint32_t idle = 0;
     return __atomic_compare_exchange_n(&gate->busy, &idle, 1u, 0,
@@ -8,11 +10,23 @@ int vita_trace_control_enter(VitaTraceControlGate *gate) {
 }
 
 int vita_trace_control_pending(const VitaTraceControlGate *gate) {
-    return __atomic_load_n(&gate->cleanup_pending, __ATOMIC_ACQUIRE) != 0;
+    return (__atomic_load_n(&gate->target_state, __ATOMIC_ACQUIRE) & CLEANUP_REQUESTED) != 0;
 }
 
-void vita_trace_control_request(VitaTraceControlGate *gate) {
-    __atomic_store_n(&gate->cleanup_pending, 1u, __ATOMIC_RELEASE);
+uint32_t vita_trace_control_target(const VitaTraceControlGate *gate) {
+    return __atomic_load_n(&gate->target_state, __ATOMIC_ACQUIRE) & ~CLEANUP_REQUESTED;
+}
+
+void vita_trace_control_set_target(VitaTraceControlGate *gate, uint32_t pid) {
+    __atomic_store_n(&gate->target_state, pid & ~CLEANUP_REQUESTED, __ATOMIC_RELEASE);
+}
+
+int vita_trace_control_request(VitaTraceControlGate *gate, uint32_t pid) {
+    if (!pid || (pid & CLEANUP_REQUESTED)) return 0;
+    uint32_t expected = pid;
+    if (__atomic_compare_exchange_n(&gate->target_state, &expected, pid | CLEANUP_REQUESTED,
+                                     0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) return 1;
+    return expected == (pid | CLEANUP_REQUESTED);
 }
 
 int vita_trace_control_reap(VitaTraceControlGate *gate, VitaTraceCleanup cleanup, void *context) {
@@ -21,7 +35,7 @@ int vita_trace_control_reap(VitaTraceControlGate *gate, VitaTraceCleanup cleanup
     int ret = 0;
     if (vita_trace_control_pending(gate)) {
         ret = cleanup(context);
-        if (ret == 0) __atomic_store_n(&gate->cleanup_pending, 0u, __ATOMIC_RELEASE);
+        if (ret == 0) __atomic_fetch_and(&gate->target_state, ~CLEANUP_REQUESTED, __ATOMIC_RELEASE);
     }
     __atomic_store_n(&gate->busy, 0u, __ATOMIC_RELEASE);
     return ret;

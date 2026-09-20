@@ -35,8 +35,7 @@ void vita_tracy_control_end(VitaTracyKernelState *st) {
 }
 
 void vita_tracy_target_exited(VitaTracyKernelState *st, SceUID pid) {
-    if (!st->target_pid || st->target_pid != pid) return;
-    vita_trace_control_request(&st->control);
+    if (!vita_trace_control_request(&st->control, (uint32_t)pid)) return;
     vita_tracy_notify(st);
     // A callback re-entering an active syscall must not wait for its owner.
     // That owner reaps on exit; failed cleanup stays pending for a later retry.
@@ -102,7 +101,7 @@ int vitaTracyWakeup(void) {
     ENTER_SYSCALL(syscall_state);
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = VITA_TRACY_ERROR_TARGET;
-    if (st->target_pid != 0 && st->target_pid == ksceKernelGetProcessId()) {
+    if (vita_trace_control_target(&st->control) == (uint32_t)ksceKernelGetProcessId()) {
         vita_tracy_notify(st);
         ret = VITA_TRACY_OK;
     }
@@ -115,7 +114,7 @@ int vitaTracyWaitForData(uint32_t timeout_us) {
     ENTER_SYSCALL(syscall_state);
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = VITA_TRACY_ERROR_TARGET;
-    if (st->target_pid != 0 && st->target_pid == ksceKernelGetProcessId()) {
+    if (vita_trace_control_target(&st->control) == (uint32_t)ksceKernelGetProcessId()) {
         unsigned int bits = 0;
         SceUInt timeout = timeout_us;
         ret = ksceKernelWaitEventFlag(st->data_event, 1u,
@@ -140,6 +139,7 @@ int vita_tracy_detach(VitaTracyKernelState *st) {
     st->shared = NULL;
     st->shared_size = 0;
     st->target_pid = 0;
+    vita_trace_control_set_target(&st->control, 0);
     vita_tracy_notify(st);
 
     transition(st, VITA_TRACY_EVENT_DETACH);
@@ -238,6 +238,7 @@ static int vitaTracyRegister_impl(const VitaTracyRegisterArgs *args) {
     st->sampling_hz = VITA_TRACE_DEFAULT_SAMPLE_HZ;
     st->sampling_flags = 0;
     memset(&st->stats, 0, sizeof(st->stats));
+    vita_trace_control_set_target(&st->control, (uint32_t)target_pid);
 
     /* Proves to the client that the call reached the kernel rather than a
      * weak import stub standing in for an absent plugin. */
