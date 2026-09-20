@@ -12,6 +12,30 @@ build, plugin hash and exact unstripped ELF. Preserve the capture and bring-up
 report alongside them. Avoid combining a newer HB with a previously loaded
 plugin merely because their library names still match.
 
+After building, record the exact files with the host-only manifest tool:
+
+```sh
+python3 tools/capture_manifest.py \
+  --artifact elf=build-vita/samples/automatic/automatic_sample \
+  --artifact vpk=build-vita/samples/automatic/automatic_sample.vpk \
+  --artifact plugin=build-vita/kernel/tracy_kernel.skprx \
+  --output build-vita/session-manifest.json
+```
+
+Use `--firmware` only for the firmware actually observed on the console;
+omit it before hardware testing. Repeat `--note` to record workload, clocks,
+core mask/rate, measured results or failure symptoms. More named files can
+be supplied with `--artifact name=path`, including captures and reports.
+Keep the manifest and the actual files together; hashing does not archive them.
+
+The tool uses SHA-256 and records source/Tracy revisions, working-tree status,
+tracked-diff hashes and compiler version. It rejects duplicate artifact names,
+observed file changes during hashing, and overwriting an existing manifest.
+Missing source/compiler metadata is explicit, never guessed. These are
+snapshots at manifest creation, not proof that the supplied files were built
+from that revision or compiler. Save local patches and untracked sources
+separately; their original contents cannot be reconstructed from hashes.
+
 ABI 3 requires a matching plugin/client pair. Exported library version 25
 is not an exact build identifier. Build both from the tested commit and
 replace the provider only while no client is running or using its imports.
