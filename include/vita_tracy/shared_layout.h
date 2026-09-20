@@ -58,6 +58,9 @@ int vita_trace_shared_init(void *mem, size_t mem_size, uint32_t target_pid, uint
 
 /* Checks magic and ABI version before a consumer trusts the block. */
 int vita_trace_shared_is_valid(const void *mem);
+/* Validate all declared offsets and ring shapes before accepting a mapping.
+ * As with the SPSC protocol, callers must not mutate layout fields afterward. */
+int vita_trace_shared_validate_layout(const void *mem, size_t size);
 
 /* Records that the kernel has taken the block. Called from the kernel side
  * of a register call. */

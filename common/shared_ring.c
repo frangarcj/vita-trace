@@ -19,7 +19,8 @@ int vita_trace_is_pow2(uint32_t value) {
 }
 
 size_t vita_trace_ring_layout_size(uint32_t capacity, uint32_t element_size) {
-    return sizeof(VitaTraceRingHeader) + (size_t)capacity * (size_t)element_size;
+    uint64_t bytes = sizeof(VitaTraceRingHeader) + (uint64_t)capacity * element_size;
+    return bytes <= UINT32_MAX ? (size_t)bytes : 0;
 }
 
 int vita_trace_ring_init(void *mem, size_t mem_size, uint32_t capacity, uint32_t element_size) {
@@ -29,7 +30,8 @@ int vita_trace_ring_init(void *mem, size_t mem_size, uint32_t capacity, uint32_t
     if (!vita_trace_is_pow2(capacity)) {
         return 0;
     }
-    if (mem_size < vita_trace_ring_layout_size(capacity, element_size)) {
+    size_t required = vita_trace_ring_layout_size(capacity, element_size);
+    if (required == 0 || mem_size < required) {
         return 0;
     }
 

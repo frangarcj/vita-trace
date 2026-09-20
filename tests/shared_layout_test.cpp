@@ -40,6 +40,29 @@ TEST_CASE("layout size covers every ring") {
     CHECK(size >= sizeof(VitaTraceSharedHeader) + samples + control);
 }
 
+TEST_CASE("shared layout rejects sizes that overflow the 32-bit Vita ABI") {
+    CHECK(vita_trace_ring_layout_size(0x80000000u, 32) == 0);
+    CHECK(vita_trace_shared_layout_size(0x80000000u, 16) == 0);
+    CHECK(vita_trace_shared_layout_size(0x02000000u, 16) == 0);
+    CHECK(vita_trace_shared_layout_size(64, 0x80000000u) == 0);
+    uint8_t tiny[sizeof(VitaTraceSharedHeader)]{};
+    CHECK_FALSE(vita_trace_shared_init(tiny, sizeof(tiny), kPid, kHz, 0x80000000u, 16));
+}
+
+TEST_CASE("full layout validation rejects corrupt offsets and ring metadata") {
+    auto mem = make_shared_block();
+    CHECK(vita_trace_shared_validate_layout(mem.data(), mem.size()));
+    CHECK_FALSE(vita_trace_shared_validate_layout(mem.data(), mem.size() - 1));
+    auto *hdr = reinterpret_cast<VitaTraceSharedHeader *>(mem.data());
+    const uint32_t offset = hdr->core_ring_offset[0];
+    hdr->core_ring_offset[0] = 0xFFFFFFF0u;
+    CHECK_FALSE(vita_trace_shared_validate_layout(mem.data(), mem.size()));
+    hdr->core_ring_offset[0] = offset;
+    auto *ring = reinterpret_cast<VitaTraceRingHeader *>(mem.data() + offset);
+    ring->element_size = 0x10000;
+    CHECK_FALSE(vita_trace_shared_validate_layout(mem.data(), mem.size()));
+}
+
 TEST_CASE("init rejects an undersized block") {
     size_t size = vita_trace_shared_layout_size(kSampleCapacity, kControlCapacity);
     std::vector<uint8_t> mem(size);
