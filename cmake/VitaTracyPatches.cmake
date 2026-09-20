@@ -9,7 +9,7 @@
 function(vita_tracy_apply_patches)
     find_package(Git QUIET REQUIRED)
 
-    file(GLOB patch_files "${CMAKE_SOURCE_DIR}/patches/tracy/*.patch")
+    file(GLOB patch_files "${VITA_TRACY_SOURCE_DIR}/patches/tracy/*.patch")
     list(SORT patch_files)
 
     foreach(patch ${patch_files})
@@ -17,7 +17,7 @@ function(vita_tracy_apply_patches)
 
         execute_process(
             COMMAND "${GIT_EXECUTABLE}" apply --reverse --check "${patch}"
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/third_party/tracy"
+            WORKING_DIRECTORY "${VITA_TRACY_SOURCE_DIR}/third_party/tracy"
             RESULT_VARIABLE already_applied
             OUTPUT_QUIET ERROR_QUIET
         )
@@ -29,7 +29,7 @@ function(vita_tracy_apply_patches)
 
         execute_process(
             COMMAND "${GIT_EXECUTABLE}" apply "${patch}"
-            WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}/third_party/tracy"
+            WORKING_DIRECTORY "${VITA_TRACY_SOURCE_DIR}/third_party/tracy"
             RESULT_VARIABLE apply_result
             ERROR_VARIABLE apply_error
         )

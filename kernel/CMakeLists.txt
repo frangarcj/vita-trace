@@ -6,18 +6,19 @@ add_executable(tracy_kernel
     sampler_debug_fallback.c
     sampler_pamgr.c
     service.c
-    ${CMAKE_SOURCE_DIR}/common/shared_layout.c
-    ${CMAKE_SOURCE_DIR}/common/shared_ring.c
+    ${VITA_TRACY_SOURCE_DIR}/common/shared_layout.c
+    ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
     state.c
 )
 
 target_include_directories(tracy_kernel PRIVATE
-    ${CMAKE_SOURCE_DIR}/include
+    ${VITA_TRACY_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 target_compile_options(tracy_kernel PRIVATE
     -Wall -Wextra -O2 -fno-builtin
+    -mgeneral-regs-only -fno-tree-vectorize -fno-tree-slp-vectorize
 )
 
 # Module enumeration lives in SceModulemgrForKernel, whose NIDs differ

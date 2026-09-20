@@ -1,7 +1,7 @@
 add_library(tracy_vita STATIC
-    ${CMAKE_SOURCE_DIR}/third_party/tracy/public/TracyClient.cpp
-    ${CMAKE_SOURCE_DIR}/common/shared_layout.c
-    ${CMAKE_SOURCE_DIR}/common/shared_ring.c
+    ${VITA_TRACY_SOURCE_DIR}/third_party/tracy/public/TracyClient.cpp
+    ${VITA_TRACY_SOURCE_DIR}/common/shared_layout.c
+    ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
     clock_sync.c
     pmu_delta.c
     timebase_convert.c
@@ -14,8 +14,8 @@ add_library(tracy_vita STATIC
 )
 
 target_include_directories(tracy_vita PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/third_party/tracy/public
+    ${VITA_TRACY_SOURCE_DIR}/include
+    ${VITA_TRACY_SOURCE_DIR}/third_party/tracy/public
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
@@ -59,7 +59,7 @@ target_compile_definitions(tracy_vita PRIVATE
 # The control ABI is imported weakly so an instrumented application still
 # loads and runs when tracy_kernel.skprx is absent.
 set(VITA_TRACY_KERNEL_STUB
-    ${CMAKE_BINARY_DIR}/kernel/tracy_kernel_stubs/libVitaTracyKernel_stub_weak.a)
+    ${VITA_TRACY_BINARY_DIR}/kernel/tracy_kernel_stubs/libVitaTracyKernel_stub_weak.a)
 
 target_link_libraries(tracy_vita PUBLIC
     ${VITA_TRACY_KERNEL_STUB}
