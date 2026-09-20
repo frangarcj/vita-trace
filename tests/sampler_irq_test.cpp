@@ -48,6 +48,9 @@ struct Fake {
     int handler_registrations = 0;
     int handler_result = 0;
     int context_result = 0;
+    VitaTracyKernelState *stop_in_context = nullptr;
+    int stop_result = 0;
+    bool nested_context = false;
     uint64_t now = 10000;
     void *registered_handler = nullptr;
     SceKernelThreadContextInfo thread{123, 0x500};
@@ -141,6 +144,19 @@ int ksceExcpmgrRegisterHandler(SceExcpKind kind, int priority, void *handler) {
 }
 
 int ksceKernelGetThreadContextInfo(SceKernelThreadContextInfo *info) {
+    if (fake.nested_context) {
+        fake.nested_context = false;
+        SceExcpmgrExceptionContext nested{};
+        nested.SPSR = 0x10u;
+        nested.address_of_faulting_instruction = 0x81234000u;
+        fake.banks[fake.core].overflow |= VITA_PMU_CYCLE_BIT;
+        vita_tracy_irq_handler_c(&nested, SCE_EXCPMGR_EXCEPTION_HANDLED);
+    }
+    if (fake.stop_in_context) {
+        auto *state = fake.stop_in_context;
+        fake.stop_in_context = nullptr;
+        fake.stop_result = vita_tracy_sampler_irq_stop(state);
+    }
     if (fake.context_result < 0) return fake.context_result;
     *info = fake.thread;
     return 0;
@@ -327,4 +343,37 @@ TEST_CASE_FIXTURE(Fixture, "IRQ handler registration failure rolls back prepared
         CHECK(bank.cycles == 200);
     }
     CHECK(fake.jobs.empty());
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ stop retains state while an admitted callback still uses it") {
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    fake.stop_in_context = &state;
+    SceExcpmgrExceptionContext context{};
+    context.SPSR = 0x10u;
+    context.address_of_faulting_instruction = 0x81234000u;
+    overflow(0, context);
+    CHECK(fake.stop_result == VITA_TRACY_ERROR_BUSY);
+    CHECK(fake.banks[0].enable == VITA_PMU_CYCLE_BIT);
+    CHECK(vita_tracy_sampler_irq_start(&state) == VITA_TRACY_ERROR_BUSY);
+    REQUIRE(vita_tracy_sampler_irq_stop(&state) == 0);
+    for (const auto &bank : fake.banks) CHECK(bank.enable == 0);
+    auto emitted = state.stats.samples_emitted[0];
+    overflow(0, context);
+    CHECK(state.stats.samples_emitted[0] == emitted);
+}
+
+TEST_CASE_FIXTURE(Fixture, "nested IRQ callbacks cannot become two producers for one ring") {
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    fake.nested_context = true;
+    SceExcpmgrExceptionContext context{};
+    context.SPSR = 0x10u;
+    context.address_of_faulting_instruction = 0x81234000u;
+    overflow(1, context);
+    CHECK(state.stats.samples_emitted[1] == 1);
+    CHECK(state.stats.sample_irq_calls[1] == 1);
+    REQUIRE(vita_tracy_sampler_irq_stop(&state) == 0);
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    overflow(1, context);
+    CHECK(state.stats.samples_emitted[1] == 2);
+    CHECK(fake.handler_registrations == 1);
 }

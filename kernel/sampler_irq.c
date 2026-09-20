@@ -11,6 +11,8 @@
 
 #define VITA_TRACY_IRQ_CORE_MASK 7u
 #define VITA_TRACY_IRQ_HANDLER_PRIORITY 7
+#define IRQ_ADMISSION_OPEN 0x80000000u
+#define IRQ_ADMISSION_ACTIVE 1u
 
 const VitaPmuIo *vita_tracy_pmu_io(void);
 
@@ -24,6 +26,7 @@ typedef struct IrqCpu {
     int result;
     int job_started;
     uint32_t failed;
+    uint32_t admission;
 } IrqCpu;
 
 typedef struct IrqSampler {
@@ -166,12 +169,8 @@ static int register_handler(VitaTracyKernelState *st) {
     return 0;
 }
 
-void vita_tracy_irq_handler_c(SceExcpmgrExceptionContext *context, SceExcpHandlingCode code) {
-    (void)code;
+static void handle_irq(uint32_t cpu_id, SceExcpmgrExceptionContext *context) {
     if (!__atomic_load_n(&g_irq.service_enabled, __ATOMIC_ACQUIRE)) return;
-
-    const uint32_t cpu_id = (uint32_t)ksceKernelCpuId();
-    if (cpu_id >= VITA_TRACE_CORE_COUNT || !(g_irq.core_mask & (1u << cpu_id))) return;
 
     VitaTracyKernelState *st = g_irq.state;
     if (!st) return;
@@ -228,6 +227,21 @@ void vita_tracy_irq_handler_c(SceExcpmgrExceptionContext *context, SceExcpHandli
     vita_tracy_notify(st);
 }
 
+void vita_tracy_irq_handler_c(SceExcpmgrExceptionContext *context, SceExcpHandlingCode code) {
+    (void)code;
+    const uint32_t cpu_id = (uint32_t)ksceKernelCpuId();
+    if (cpu_id >= VITA_TRACE_CORE_COUNT) return;
+    IrqCpu *cpu = &g_irq.cpus[cpu_id];
+    uint32_t expected = IRQ_ADMISSION_OPEN;
+    /* One producer per core; no spinning in an exception. Closing admission
+     * and marking a callback active share one atomic operation with stop(). */
+    if (!__atomic_compare_exchange_n(&cpu->admission, &expected,
+            IRQ_ADMISSION_OPEN | IRQ_ADMISSION_ACTIVE, 0,
+            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+    handle_irq(cpu_id, context);
+    __atomic_fetch_and(&cpu->admission, ~IRQ_ADMISSION_ACTIVE, __ATOMIC_RELEASE);
+}
+
 int vita_tracy_sampler_irq_start(VitaTracyKernelState *st) {
     initialize();
     if (!st || !st->shared || !st->sampling_hz) return VITA_TRACY_ERROR_STATE;
@@ -260,12 +274,17 @@ int vita_tracy_sampler_irq_start(VitaTracyKernelState *st) {
     /* From this point the plugin is intentionally non-unloadable until reboot:
      * the public Excpmgr API has no unregister operation. */
     __atomic_store_n(&g_irq.service_enabled, 1u, __ATOMIC_RELEASE);
-    __atomic_store_n(&g_irq.emit_enabled, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_irq.emit_enabled, 0u, __ATOMIC_RELEASE);
+    for (uint32_t i = 0; i < VITA_TRACE_CORE_COUNT; ++i) {
+        if (g_irq.core_mask & (1u << i))
+            __atomic_store_n(&g_irq.cpus[i].admission, IRQ_ADMISSION_OPEN, __ATOMIC_RELEASE);
+    }
     for (uint32_t i = 0; i < VITA_TRACE_CORE_COUNT; ++i) {
         if (!(g_irq.core_mask & (1u << i))) continue;
         ret = run_job(&g_irq.cpus[i], IRQ_ARM);
         if (ret < 0) goto fail_after_handler;
     }
+    __atomic_store_n(&g_irq.emit_enabled, 1u, __ATOMIC_RELEASE);
     return VITA_TRACY_OK;
 
 fail_after_handler:
@@ -296,6 +315,12 @@ int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st) {
     if (g_irq.state && st != g_irq.state) return VITA_TRACY_ERROR_TARGET;
 
     __atomic_store_n(&g_irq.emit_enabled, 0u, __ATOMIC_RELEASE);
+    for (uint32_t i = 0; i < VITA_TRACE_CORE_COUNT; ++i) {
+        if (__atomic_load_n(&g_irq.cpus[i].admission, __ATOMIC_ACQUIRE) & IRQ_ADMISSION_ACTIVE) {
+            record_error(st, VITA_TRACY_ERROR_BUSY);
+            return VITA_TRACY_ERROR_BUSY;
+        }
+    }
     int first_error = 0;
     for (uint32_t i = 0; i < VITA_TRACE_CORE_COUNT; ++i) {
         IrqCpu *cpu = &g_irq.cpus[i];
@@ -309,6 +334,18 @@ int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st) {
     }
 
     if (!has_resources()) {
+        /* First disable/restore each bank on its own core with local IRQs
+         * masked. Keep servicing overflows if that failed, without emitting.
+         * Once no bank is armed, close admission and retain shared state if
+         * a callback entered while the per-core jobs were finishing. */
+        uint32_t active = 0;
+        for (uint32_t i = 0; i < VITA_TRACE_CORE_COUNT; ++i)
+            active |= __atomic_fetch_and(&g_irq.cpus[i].admission,
+                ~IRQ_ADMISSION_OPEN, __ATOMIC_ACQ_REL) & IRQ_ADMISSION_ACTIVE;
+        if (active) {
+            record_error(st, VITA_TRACY_ERROR_BUSY);
+            return VITA_TRACY_ERROR_BUSY;
+        }
         __atomic_store_n(&g_irq.service_enabled, 0u, __ATOMIC_RELEASE);
         g_irq.state = NULL;
         g_irq.core_mask = 0;
