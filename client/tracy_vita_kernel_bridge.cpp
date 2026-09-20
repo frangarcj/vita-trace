@@ -166,12 +166,14 @@ int DrainThread(SceSize args, void *argp) {
                 /* Stop producers before releasing the mapping. No application
                  * thread becomes the sampler's permanently excluded caller. */
                 result = vitaTracyUnregister((uint32_t)sceKernelGetProcessId());
-                if (result == 0) while (DrainBatch()) {}
-                g_bridge.draining.store(false, std::memory_order_release);
+                if (result == 0) {
+                    while (DrainBatch()) {}
+                    g_bridge.draining.store(false, std::memory_order_release);
+                }
             }
             g_bridge.command_result.store(result, std::memory_order_release);
             sceKernelSignalSema(g_bridge.command_done, 1);
-            if (command == Detach) break;
+            if (command == Detach && result == 0) break;
         }
         if (DrainBatch()) continue;
         /* A retained event bit covers the drain-to-wait race, including a

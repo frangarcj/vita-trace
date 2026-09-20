@@ -290,12 +290,15 @@ int vita_tracy_pmu_sample_start(VitaTracyKernelState *st) {
     return VITA_TRACY_OK;
 }
 
-void vita_tracy_pmu_sample_stop(VitaTracyKernelState *st) {
+int vita_tracy_pmu_sample_stop(VitaTracyKernelState *st) {
     if (st->pmu_sample_thread <= 0) {
-        return;
+        return VITA_TRACY_OK;
     }
     st->pmu_sample_should_run = 0;
-    ksceKernelWaitThreadEnd(st->pmu_sample_thread, NULL, NULL);
-    ksceKernelDeleteThread(st->pmu_sample_thread);
+    int ret = ksceKernelWaitThreadEnd(st->pmu_sample_thread, NULL, NULL);
+    if (ret < 0) return ret;
+    ret = ksceKernelDeleteThread(st->pmu_sample_thread);
+    if (ret < 0) return ret;
     st->pmu_sample_thread = 0;
+    return VITA_TRACY_OK;
 }

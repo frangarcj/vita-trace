@@ -21,6 +21,7 @@ extern "C" {
 #define VITA_TRACY_ERROR_MAP (-4)          /* the ring could not be mapped */
 #define VITA_TRACY_ERROR_TARGET (-5)       /* pid is not the attached target */
 #define VITA_TRACY_ERROR_UNSUPPORTED (-6)  /* needs a source that is not implemented yet */
+#define VITA_TRACY_ERROR_BUSY (-7)         /* ownership or callback has not quiesced */
 
 int vitaTracyRegister(const VitaTracyRegisterArgs *args);
 int vitaTracyUnregister(uint32_t target_pid);

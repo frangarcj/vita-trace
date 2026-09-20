@@ -156,18 +156,19 @@ int vita_tracy_sampler_start(VitaTracyKernelState *st) {
     return VITA_TRACY_OK;
 }
 
-void vita_tracy_sampler_stop(VitaTracyKernelState *st) {
+int vita_tracy_sampler_stop(VitaTracyKernelState *st) {
     vita_tracy_sampler_pamgr_stop(st);
 
     if (st->sampler_thread <= 0) {
-        vita_tracy_tick_stop(&st->sample_clock);
-        return;
+        return vita_tracy_tick_stop(&st->sample_clock);
     }
 
     __atomic_store_n(&st->sampler_should_run, 0, __ATOMIC_RELEASE);
     vita_tracy_tick_wake(&st->sample_clock);
-    ksceKernelWaitThreadEnd(st->sampler_thread, NULL, NULL);
-    ksceKernelDeleteThread(st->sampler_thread);
+    int ret = ksceKernelWaitThreadEnd(st->sampler_thread, NULL, NULL);
+    if (ret < 0) return ret;
+    ret = ksceKernelDeleteThread(st->sampler_thread);
+    if (ret < 0) return ret;
     st->sampler_thread = 0;
-    vita_tracy_tick_stop(&st->sample_clock);
+    return vita_tracy_tick_stop(&st->sample_clock);
 }

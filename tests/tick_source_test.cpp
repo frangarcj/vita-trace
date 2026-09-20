@@ -163,3 +163,43 @@ TEST_CASE_FIXTURE(Fixture, "shutdown can wake a worker without waiting for the n
     CHECK(source.ticks == 0);
     CHECK(vita_tracy_tick_stop(&source) == 0);
 }
+
+TEST_CASE_FIXTURE(Fixture, "custom timer callbacks run only after arm on their selected core") {
+    int calls = 0;
+    auto callback = [](void *context) { ++*static_cast<int *>(context); };
+    REQUIRE(vita_tracy_tick_prepare(&source, 100, 4u, callback, &calls) == 0);
+    CHECK(fake.mask == 4u);
+    fake.callback(17, fake.arg);
+    CHECK(calls == 0);
+    REQUIRE(vita_tracy_tick_arm(&source) == 0);
+    CHECK(vita_tracy_tick_arm(&source) == VITA_TRACY_ERROR_STATE);
+    fake.callback(17, fake.arg);
+    CHECK(calls == 1);
+    CHECK_FALSE(fake.pending); // No worker wakeup when capture runs in the callback.
+    REQUIRE(vita_tracy_tick_stop(&source) == 0);
+    fake.callback(17, fake.arg);
+    CHECK(calls == 1);
+}
+
+TEST_CASE_FIXTURE(Fixture, "closing a callback admission gate retains live callback resources") {
+    auto callback = [](void *p) {
+        auto *s = static_cast<VitaTracyTickSource *>(p);
+        CHECK(vita_tracy_tick_stop(s) == VITA_TRACY_ERROR_BUSY);
+        CHECK(fake.timer_alive); CHECK(fake.event_alive);
+        CHECK(vita_tracy_tick_arm(s) == VITA_TRACY_ERROR_STATE);
+        fake.callback(17, fake.arg); // A nested/late callback is rejected.
+    };
+    REQUIRE(vita_tracy_tick_prepare(&source, 100, 1u, callback, &source) == 0);
+    REQUIRE(vita_tracy_tick_arm(&source) == 0);
+    fake.callback(17, fake.arg);
+    CHECK(source.ticks == 1);
+    CHECK(source.enabled == 0);
+    REQUIRE(vita_tracy_tick_stop(&source) == 0);
+    CHECK_FALSE(fake.timer_alive); CHECK_FALSE(fake.event_alive);
+}
+
+TEST_CASE_FIXTURE(Fixture, "timer callbacks require exactly one valid CPU bit") {
+    for (uint32_t mask : {0u, 3u, 16u, 0x10000u})
+        CHECK(vita_tracy_tick_prepare(&source, 100, mask, nullptr, nullptr) == VITA_TRACY_ERROR_ARGS);
+    CHECK(fake.calls == 0);
+}

@@ -54,7 +54,7 @@ void vita_tracy_notify(VitaTracyKernelState *st);
 
 /* Releases the mapping and stops sampling. Safe to call repeatedly and
  * from the process-death path. */
-void vita_tracy_detach(VitaTracyKernelState *st);
+int vita_tracy_detach(VitaTracyKernelState *st);
 
 int vita_tracy_modules_snapshot(VitaTracyKernelState *st, SceUID pid);
 
@@ -62,14 +62,14 @@ int vita_tracy_proc_events_register(VitaTracyKernelState *st);
 void vita_tracy_proc_events_unregister(VitaTracyKernelState *st);
 
 int vita_tracy_sampler_start(VitaTracyKernelState *st);
-void vita_tracy_sampler_stop(VitaTracyKernelState *st);
+int vita_tracy_sampler_stop(VitaTracyKernelState *st);
 
 int vita_tracy_pmu_configure(VitaTracyKernelState *st, const VitaTracyPmuConfig *cfg);
 
 /* Kernel-owned PMCCNTR sampler: reads the cycle counter at PL1 from a
  * dedicated thread, never touching userland CP15 access at all. */
 int vita_tracy_pmu_sample_start(VitaTracyKernelState *st);
-void vita_tracy_pmu_sample_stop(VitaTracyKernelState *st);
+int vita_tracy_pmu_sample_stop(VitaTracyKernelState *st);
 
 /* Non-intrusive PC sampling. Returns VITA_TRACY_ERROR_UNSUPPORTED until a
  * source is found; see docs/reverse_engineering.md. */

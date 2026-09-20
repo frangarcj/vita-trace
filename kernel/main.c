@@ -41,7 +41,7 @@ int module_stop(SceSize args, void *argp) {
 
     VitaTracyKernelState *st = vita_tracy_state();
 
-    vita_tracy_detach(st);
+    if (vita_tracy_detach(st) < 0) return SCE_KERNEL_STOP_CANCEL;
     if (st->sample_clock.timer >= 0 || st->sample_clock.event >= 0) {
         return SCE_KERNEL_STOP_CANCEL;
     }

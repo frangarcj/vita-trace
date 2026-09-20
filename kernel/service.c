@@ -97,12 +97,15 @@ int vitaTracyWaitForData(uint32_t timeout_us) {
     return ret;
 }
 
-void vita_tracy_detach(VitaTracyKernelState *st) {
-    vita_tracy_sampler_stop(st);
-    vita_tracy_pmu_sample_stop(st);
+int vita_tracy_detach(VitaTracyKernelState *st) {
+    int ret = vita_tracy_sampler_stop(st);
+    if (ret < 0) return ret;
+    ret = vita_tracy_pmu_sample_stop(st);
+    if (ret < 0) return ret;
 
     if (st->map_uid > 0) {
-        ksceKernelUserUnmap(st->map_uid);
+        ret = ksceKernelUserUnmap(st->map_uid);
+        if (ret < 0) return ret;
         st->map_uid = 0;
     }
     st->shared = NULL;
@@ -111,6 +114,7 @@ void vita_tracy_detach(VitaTracyKernelState *st) {
     vita_tracy_notify(st);
 
     transition(st, VITA_TRACY_EVENT_DETACH);
+    return VITA_TRACY_OK;
 }
 
 static int copy_args_from_user(SceUID pid, void *dst, const void *user_src, SceSize size) {
@@ -235,8 +239,7 @@ static int vitaTracyUnregister_impl(uint32_t target_pid) {
         return VITA_TRACY_ERROR_TARGET;
     }
 
-    vita_tracy_detach(st);
-    return VITA_TRACY_OK;
+    return vita_tracy_detach(st);
 }
 
 int vitaTracySetSampling(const VitaTracySamplingConfig *cfg) {
@@ -270,7 +273,8 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
 
     if (local.frequency_hz == 0) {
         if (st->state == VITA_TRACY_STATE_PROFILING) {
-            vita_tracy_sampler_stop(st);
+            int ret = vita_tracy_sampler_stop(st);
+            if (ret < 0) return ret;
             transition(st, VITA_TRACY_EVENT_STOP);
         }
         st->stats.sampling_flags = 0;
@@ -278,7 +282,8 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
     }
 
     if (st->state == VITA_TRACY_STATE_PROFILING) {
-        vita_tracy_sampler_stop(st);
+        int ret = vita_tracy_sampler_stop(st);
+        if (ret < 0) return ret;
         transition(st, VITA_TRACY_EVENT_STOP);
     }
     st->sampling_hz = local.frequency_hz;
@@ -404,6 +409,5 @@ int vitaTracyPmuSampleStop(void) {
 static int vitaTracyPmuSampleStop_impl(void) {
     VitaTracyKernelState *st = vita_tracy_state();
     if (st->target_pid == 0 || ksceKernelGetProcessId() != st->target_pid) return VITA_TRACY_ERROR_TARGET;
-    vita_tracy_pmu_sample_stop(st);
-    return VITA_TRACY_OK;
+    return vita_tracy_pmu_sample_stop(st);
 }

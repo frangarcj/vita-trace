@@ -3,12 +3,21 @@
 #include "tick_source.h"
 #include "vita_tracy/kernel_abi.h"
 
+#define TICK_OPEN 0x80000000u
+#define TICK_ACTIVE 1u
+
 static void on_tick(SceSysTimerId timer, void *arg) {
     (void)timer;
     VitaTracyTickSource *source = (VitaTracyTickSource *)arg;
-    if (__atomic_load_n(&source->enabled, __ATOMIC_ACQUIRE)) {
+    uint32_t expected = TICK_OPEN;
+    /* Admission and closing use one atomic word. A callback cannot slip in
+     * between a separate enabled check and increment of the in-flight count. */
+    if (__atomic_compare_exchange_n(&source->enabled, &expected, TICK_OPEN | TICK_ACTIVE,
+                                    0, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) {
         __atomic_fetch_add(&source->ticks, 1u, __ATOMIC_RELAXED);
-        ksceKernelSetEventFlag(source->event, 1u);
+        if (source->callback) source->callback(source->context);
+        else ksceKernelSetEventFlag(source->event, 1u);
+        __atomic_fetch_and(&source->enabled, ~TICK_ACTIVE, __ATOMIC_RELEASE);
     }
 }
 
@@ -17,6 +26,9 @@ void vita_tracy_tick_init(VitaTracyTickSource *source) {
     source->event = -1;
     source->enabled = 0;
     source->ticks = 0;
+    source->prepared = 0;
+    source->callback = NULL;
+    source->context = NULL;
 }
 
 void vita_tracy_tick_wake(VitaTracyTickSource *source) {
@@ -24,7 +36,9 @@ void vita_tracy_tick_wake(VitaTracyTickSource *source) {
 }
 
 int vita_tracy_tick_stop(VitaTracyTickSource *source) {
-    __atomic_store_n(&source->enabled, 0u, __ATOMIC_RELEASE);
+    source->prepared = 0;
+    uint32_t previous = __atomic_fetch_and(&source->enabled, ~TICK_OPEN, __ATOMIC_ACQ_REL);
+    if (previous & TICK_ACTIVE) return VITA_TRACY_ERROR_BUSY;
     if (source->timer >= 0) {
         /* Free releases the timer and its handler. Keep the event alive until
          * that succeeds; a failed release must never leave a dangling callback. */
@@ -42,8 +56,17 @@ int vita_tracy_tick_stop(VitaTracyTickSource *source) {
 }
 
 int vita_tracy_tick_start(VitaTracyTickSource *source, uint32_t frequency_hz) {
+    int ret = vita_tracy_tick_prepare(source, frequency_hz, 1u, NULL, NULL);
+    return ret < 0 ? ret : vita_tracy_tick_arm(source);
+}
+
+int vita_tracy_tick_prepare(VitaTracyTickSource *source, uint32_t frequency_hz,
+                           uint32_t cpu_mask, VitaTracyTickCallback callback, void *context) {
     if (!frequency_hz || frequency_hz > VITA_TRACY_MAX_SAMPLE_HZ) return VITA_TRACY_ERROR_ARGS;
+    if (!cpu_mask || (cpu_mask & (cpu_mask - 1u)) || (cpu_mask & ~15u)) return VITA_TRACY_ERROR_ARGS;
     if (source->timer >= 0 || source->event >= 0) return VITA_TRACY_ERROR_STATE;
+    source->callback = callback;
+    source->context = context;
     source->event = ksceKernelCreateEventFlag("VitaTracyTick", 0, 0, NULL);
     if (source->event < 0) return source->event;
     source->timer = ksceKernelSysTimerAlloc(SCE_SYSTIMER_TYPE_WORD);
@@ -55,16 +78,26 @@ int vita_tracy_tick_start(VitaTracyTickSource *source, uint32_t frequency_hz) {
     if (ret < 0) goto fail;
     ret = ksceKernelSysTimerSetInterval(source->timer, 1000000u / frequency_hz);
     if (ret < 0) goto fail;
-    ret = ksceKernelSysTimerSetHandler(source->timer, on_tick, 1u, source);
+    ret = ksceKernelSysTimerSetHandler(source->timer, on_tick, cpu_mask, source);
     if (ret < 0) goto fail;
     ret = ksceKernelSysTimerResetCount(source->timer);
     if (ret < 0) goto fail;
     __atomic_store_n(&source->ticks, 0u, __ATOMIC_RELAXED);
-    __atomic_store_n(&source->enabled, 1u, __ATOMIC_RELEASE);
-    ret = ksceKernelSysTimerStartCount(source->timer);
-    if (ret >= 0) return 0;
+    source->prepared = 1;
+    return 0;
 fail:
     vita_tracy_tick_stop(source);
+    return ret;
+}
+
+int vita_tracy_tick_arm(VitaTracyTickSource *source) {
+    if (!source->prepared || source->timer < 0 || source->event < 0) return VITA_TRACY_ERROR_STATE;
+    uint32_t closed = 0;
+    if (!__atomic_compare_exchange_n(&source->enabled, &closed, TICK_OPEN, 0,
+                                     __ATOMIC_RELEASE, __ATOMIC_RELAXED)) return VITA_TRACY_ERROR_STATE;
+    source->prepared = 0;
+    int ret = ksceKernelSysTimerStartCount(source->timer);
+    if (ret < 0) vita_tracy_tick_stop(source);
     return ret;
 }
 

@@ -4,17 +4,25 @@
 extern "C" {
 #endif
 
-/* A system-allocated periodic timer. The callback only wakes the worker:
- * it does NOT capture the interrupted PC and must not be described as such. */
+typedef void (*VitaTracyTickCallback)(void *context);
+/* A single-CPU system timer. A custom callback must be IRQ-safe: no blocking,
+ * allocation, logging or register-state assumptions beyond its own backend. */
 typedef struct VitaTracyTickSource {
     int32_t timer;
     int32_t event;
     uint32_t enabled;
     uint32_t ticks;
+    uint32_t prepared;
+    VitaTracyTickCallback callback;
+    void *context;
 } VitaTracyTickSource;
 
 void vita_tracy_tick_init(VitaTracyTickSource *source);
 int vita_tracy_tick_start(VitaTracyTickSource *source, uint32_t frequency_hz);
+/* Prepare/arm split lets multi-core backends finish setup before recording. */
+int vita_tracy_tick_prepare(VitaTracyTickSource *source, uint32_t frequency_hz,
+                           uint32_t cpu_mask, VitaTracyTickCallback callback, void *context);
+int vita_tracy_tick_arm(VitaTracyTickSource *source);
 int vita_tracy_tick_wait(VitaTracyTickSource *source);
 void vita_tracy_tick_wake(VitaTracyTickSource *source);
 /* On failure, retain handles so the caller can retry and refuse unload. */
