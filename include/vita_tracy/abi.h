@@ -76,6 +76,7 @@ typedef struct VitaTracyStats {
     uint32_t pmu_gaps[4];
     uint32_t pmu_wrong_cpu[4];
     uint32_t pmu_counter_errors[4];
+    int32_t last_cleanup_error;
 } VitaTracyStats;
 
 #ifdef __cplusplus

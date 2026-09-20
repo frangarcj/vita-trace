@@ -15,14 +15,7 @@ static void release_if_target(SceUID pid) {
         return;
     }
 
-    VitaTraceControlRecord record;
-    memset(&record, 0, sizeof(record));
-    record.type = VITA_TRACE_PROCESS_EXIT;
-    record.timestamp = vita_tracy_kernel_now();
-    record.payload.process_exit.pid = (uint32_t)pid;
-    vita_tracy_emit_control(st, &record);
-
-    vita_tracy_detach(st);
+    vita_tracy_target_exited(st, pid);
 }
 
 static int on_create(SceUID pid, SceProcEventInvokeParam2 *param, int a3) {
@@ -89,9 +82,11 @@ int vita_tracy_proc_events_register(VitaTracyKernelState *st) {
     return VITA_TRACY_OK;
 }
 
-void vita_tracy_proc_events_unregister(VitaTracyKernelState *st) {
+int vita_tracy_proc_events_unregister(VitaTracyKernelState *st) {
     if (st->proc_event_uid > 0) {
-        ksceKernelUnregisterProcEventHandler(st->proc_event_uid);
+        int ret = ksceKernelUnregisterProcEventHandler(st->proc_event_uid);
+        if (ret < 0) return ret;
         st->proc_event_uid = 0;
     }
+    return 0;
 }

@@ -34,6 +34,7 @@ static int sampler_thread(SceSize args, void *argp) {
     while (__atomic_load_n(&st->sampler_should_run, __ATOMIC_ACQUIRE)) {
         if (vita_tracy_tick_wait(&st->sample_clock) < 0) break;
         if (!__atomic_load_n(&st->sampler_should_run, __ATOMIC_ACQUIRE)) break;
+        if (vita_trace_control_pending(&st->control)) break;
         __atomic_fetch_add(&st->stats.diagnostic_batches, 1u, __ATOMIC_RELAXED);
 
         SceUID thids[VITA_TRACY_MAX_THREADS];
@@ -41,7 +42,7 @@ static int sampler_thread(SceSize args, void *argp) {
 
         VitaTraceSharedHeader *shared = (VitaTraceSharedHeader *)st->shared;
         if (!vita_trace_thread_registry_complete(&shared->profiler_threads)) {
-            st->stats.registry_incomplete_ticks++;
+            __atomic_fetch_add(&st->stats.registry_incomplete_ticks, 1u, __ATOMIC_RELAXED);
         } else if (ksceKernelGetThreadIdList(st->target_pid, thids, VITA_TRACY_MAX_THREADS, &copied) >= 0) {
 
             for (int i = 0; i < copied && i < VITA_TRACY_MAX_THREADS &&
@@ -95,11 +96,11 @@ static int sampler_thread(SceSize args, void *argp) {
                      * claim about which core executed the sampled thread. */
                     vita_tracy_emit_sample(st, 0, &sample);
                 } else {
-                    st->stats.sample_read_failures++;
+                    __atomic_fetch_add(&st->stats.sample_read_failures, 1u, __ATOMIC_RELAXED);
                 }
 
                 if (ksceKernelDebugResumeThread(thids[i], VITA_TRACY_RESUME_STATUS) < 0) {
-                    st->stats.sample_resume_failures++;
+                    __atomic_fetch_add(&st->stats.sample_resume_failures, 1u, __ATOMIC_RELAXED);
                     __atomic_store_n(&st->sampler_should_run, 0, __ATOMIC_RELEASE);
                     break;
                 }

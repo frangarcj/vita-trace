@@ -14,6 +14,35 @@ VitaTracyKernelState *vita_tracy_state(void) {
     return &g_state;
 }
 
+static int cleanup_exited_target(void *context) {
+    VitaTracyKernelState *st = (VitaTracyKernelState *)context;
+    int ret = vita_tracy_detach(st);
+    __atomic_store_n(&st->stats.last_cleanup_error, ret, __ATOMIC_RELEASE);
+    return ret;
+}
+
+int vita_tracy_control_begin(VitaTracyKernelState *st) {
+    if (!vita_trace_control_enter(&st->control)) return VITA_TRACY_ERROR_BUSY;
+    if (st->shutdown_requested || vita_trace_control_pending(&st->control)) {
+        vita_tracy_control_end(st);
+        return VITA_TRACY_ERROR_STATE;
+    }
+    return VITA_TRACY_OK;
+}
+
+void vita_tracy_control_end(VitaTracyKernelState *st) {
+    vita_trace_control_leave(&st->control, cleanup_exited_target, st);
+}
+
+void vita_tracy_target_exited(VitaTracyKernelState *st, SceUID pid) {
+    if (!st->target_pid || st->target_pid != pid) return;
+    vita_trace_control_request(&st->control);
+    vita_tracy_notify(st);
+    // A callback re-entering an active syscall must not wait for its owner.
+    // That owner reaps on exit; failed cleanup stays pending for a later retry.
+    vita_trace_control_reap(&st->control, cleanup_exited_target, st);
+}
+
 uint64_t vita_tracy_kernel_now(void) {
     return (uint64_t)ksceKernelGetSystemTimeWide();
 }
@@ -36,9 +65,9 @@ void vita_tracy_emit_sample(VitaTracyKernelState *st, uint32_t cpu, const VitaTr
         return;
     }
     if (vita_trace_ring_try_push(ring, sample)) {
-        st->stats.samples_emitted[cpu]++;
+        __atomic_fetch_add(&st->stats.samples_emitted[cpu], 1u, __ATOMIC_RELAXED);
     } else {
-        st->stats.samples_dropped[cpu]++;
+        __atomic_fetch_add(&st->stats.samples_dropped[cpu], 1u, __ATOMIC_RELAXED);
     }
 }
 
@@ -57,7 +86,7 @@ void vita_tracy_emit_control(VitaTracyKernelState *st, const VitaTraceControlRec
         __asm__ volatile("yield");
     }
     if (!vita_trace_ring_try_push(ring, record)) {
-        st->stats.control_dropped++;
+        __atomic_fetch_add(&st->stats.control_dropped, 1u, __ATOMIC_RELAXED);
     }
     __atomic_store_n(&st->control_writer_lock, 0u, __ATOMIC_RELEASE);
     ksceKernelCpuResumeIntr(intr);
@@ -146,7 +175,9 @@ static int vitaTracyPmuSampleStop_impl(void);
 int vitaTracyRegister(const VitaTracyRegisterArgs *args) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
-    int ret = vitaTracyRegister_impl(args);
+    VitaTracyKernelState *st = vita_tracy_state();
+    int ret = vita_tracy_control_begin(st);
+    if (ret == 0) { ret = vitaTracyRegister_impl(args); vita_tracy_control_end(st); }
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -226,7 +257,9 @@ static int vitaTracyRegister_impl(const VitaTracyRegisterArgs *args) {
 int vitaTracyUnregister(uint32_t target_pid) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
-    int ret = vitaTracyUnregister_impl(target_pid);
+    VitaTracyKernelState *st = vita_tracy_state();
+    int ret = vita_tracy_control_begin(st);
+    if (ret == 0) { ret = vitaTracyUnregister_impl(target_pid); vita_tracy_control_end(st); }
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -245,7 +278,9 @@ static int vitaTracyUnregister_impl(uint32_t target_pid) {
 int vitaTracySetSampling(const VitaTracySamplingConfig *cfg) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
-    int ret = vitaTracySetSampling_impl(cfg);
+    VitaTracyKernelState *st = vita_tracy_state();
+    int ret = vita_tracy_control_begin(st);
+    if (ret == 0) { ret = vitaTracySetSampling_impl(cfg); vita_tracy_control_end(st); }
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -304,7 +339,9 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
 int vitaTracySetPmu(const VitaTracyPmuConfig *cfg) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
-    int ret = vitaTracySetPmu_impl(cfg);
+    VitaTracyKernelState *st = vita_tracy_state();
+    int ret = vita_tracy_control_begin(st);
+    if (ret == 0) { ret = vitaTracySetPmu_impl(cfg); vita_tracy_control_end(st); }
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -334,7 +371,9 @@ static int vitaTracySetPmu_impl(const VitaTracyPmuConfig *cfg) {
 int vitaTracySnapshotModules(uint32_t target_pid) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
-    int ret = vitaTracySnapshotModules_impl(target_pid);
+    VitaTracyKernelState *st = vita_tracy_state();
+    int ret = vita_tracy_control_begin(st);
+    if (ret == 0) { ret = vitaTracySnapshotModules_impl(target_pid); vita_tracy_control_end(st); }
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -352,7 +391,9 @@ static int vitaTracySnapshotModules_impl(uint32_t target_pid) {
 int vitaTracyGetStats(VitaTracyStats *stats) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
-    int ret = vitaTracyGetStats_impl(stats);
+    VitaTracyKernelState *st = vita_tracy_state();
+    int ret = vita_tracy_control_begin(st);
+    if (ret == 0) { ret = vitaTracyGetStats_impl(stats); vita_tracy_control_end(st); }
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -370,12 +411,32 @@ static int vitaTracyGetStats_impl(VitaTracyStats *stats) {
         return VITA_TRACY_ERROR_ABI;
     }
 
-    st->stats.size = sizeof(VitaTracyStats);
-    st->stats.abi_version = VITA_TRACY_ABI_VERSION;
-    st->stats.uptime_ms = (uint32_t)(vita_tracy_kernel_now() / 1000ull);
-    st->stats.timer_ticks = __atomic_load_n(&st->sample_clock.ticks, __ATOMIC_RELAXED);
-
-    if (ksceKernelCopyToUserProc(caller_pid, stats, &st->stats, sizeof(st->stats)) < 0) {
+    /* Independent monotonic counters, not a simultaneous cross-core snapshot.
+     * PMU vector records contain the coherent measurement intervals. */
+    memset(&local, 0, sizeof(local));
+    local.size = sizeof(local);
+    local.abi_version = VITA_TRACY_ABI_VERSION;
+    local.uptime_ms = (uint32_t)(vita_tracy_kernel_now() / 1000ull);
+    local.timer_ticks = __atomic_load_n(&st->sample_clock.ticks, __ATOMIC_RELAXED);
+#define LOAD_STAT(member) local.member = __atomic_load_n(&st->stats.member, __ATOMIC_RELAXED)
+    LOAD_STAT(control_dropped);
+    LOAD_STAT(pmu_cycle_delta_total);
+    LOAD_STAT(pmu_sample_ticks);
+    LOAD_STAT(sampling_flags);
+    LOAD_STAT(registry_incomplete_ticks);
+    LOAD_STAT(sample_read_failures);
+    LOAD_STAT(sample_resume_failures);
+    LOAD_STAT(diagnostic_batches);
+    LOAD_STAT(pmu_active_mask);
+    LOAD_STAT(pmu_last_error);
+    LOAD_STAT(last_cleanup_error);
+    for (uint32_t i = 0; i < VITA_TRACE_CORE_COUNT; ++i) {
+        LOAD_STAT(samples_emitted[i]); LOAD_STAT(samples_dropped[i]);
+        LOAD_STAT(pmu_records[i]); LOAD_STAT(pmu_dropped[i]); LOAD_STAT(pmu_gaps[i]);
+        LOAD_STAT(pmu_wrong_cpu[i]); LOAD_STAT(pmu_counter_errors[i]);
+    }
+#undef LOAD_STAT
+    if (ksceKernelCopyToUserProc(caller_pid, stats, &local, sizeof(local)) < 0) {
         return VITA_TRACY_ERROR_ARGS;
     }
     return VITA_TRACY_OK;
@@ -384,7 +445,9 @@ static int vitaTracyGetStats_impl(VitaTracyStats *stats) {
 int vitaTracyPmuSampleStart(void) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
-    int ret = vitaTracyPmuSampleStart_impl();
+    VitaTracyKernelState *st = vita_tracy_state();
+    int ret = vita_tracy_control_begin(st);
+    if (ret == 0) { ret = vitaTracyPmuSampleStart_impl(); vita_tracy_control_end(st); }
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -401,7 +464,9 @@ static int vitaTracyPmuSampleStart_impl(void) {
 int vitaTracyPmuSampleStop(void) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
-    int ret = vitaTracyPmuSampleStop_impl();
+    VitaTracyKernelState *st = vita_tracy_state();
+    int ret = vita_tracy_control_begin(st);
+    if (ret == 0) { ret = vitaTracyPmuSampleStop_impl(); vita_tracy_control_end(st); }
     EXIT_SYSCALL(syscall_state);
     return ret;
 }

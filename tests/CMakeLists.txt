@@ -13,6 +13,7 @@ add_executable(vita_tracy_tests
     main.cpp
     pmu_test.cpp
     pmu_core_test.cpp
+    control_gate_test.cpp
     clock_sync_test.cpp
     shared_ring_test.cpp
     shared_layout_test.cpp
@@ -21,6 +22,7 @@ add_executable(vita_tracy_tests
     thread_registry_test.cpp
     ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c
     ${VITA_TRACY_SOURCE_DIR}/common/pmu_core.c
+    ${VITA_TRACY_SOURCE_DIR}/common/control_gate.c
     ${CMAKE_SOURCE_DIR}/common/shared_layout.c
     ${CMAKE_SOURCE_DIR}/common/shared_ring.c
     ${CMAKE_SOURCE_DIR}/kernel/state.c
@@ -58,6 +60,7 @@ add_executable(vita_tracy_pmu_session_tests
     main.cpp pmu_session_test.cpp
     ${VITA_TRACY_SOURCE_DIR}/kernel/pmu_session.c
     ${VITA_TRACY_SOURCE_DIR}/common/pmu_core.c
+    ${VITA_TRACY_SOURCE_DIR}/common/control_gate.c
     ${VITA_TRACY_SOURCE_DIR}/common/shared_layout.c
     ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
 )

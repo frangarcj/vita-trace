@@ -41,13 +41,18 @@ int module_stop(SceSize args, void *argp) {
 
     VitaTracyKernelState *st = vita_tracy_state();
 
-    if (vita_tracy_detach(st) < 0) return SCE_KERNEL_STOP_CANCEL;
+    if (!vita_trace_control_enter(&st->control)) return SCE_KERNEL_STOP_CANCEL;
+    st->shutdown_requested = 1;
+    if (vita_tracy_detach(st) < 0) goto cancel;
     if (st->sample_clock.timer >= 0 || st->sample_clock.event >= 0) {
-        return SCE_KERNEL_STOP_CANCEL;
+        goto cancel;
     }
-    vita_tracy_proc_events_unregister(st);
-    if (st->data_event > 0) ksceKernelDeleteEventFlag(st->data_event);
+    if (vita_tracy_proc_events_unregister(st) < 0) goto cancel;
+    if (st->data_event > 0 && ksceKernelDeleteEventFlag(st->data_event) < 0) goto cancel;
     st->data_event = 0;
 
     return SCE_KERNEL_STOP_SUCCESS;
+cancel:
+    vita_tracy_control_end(st);
+    return SCE_KERNEL_STOP_CANCEL;
 }

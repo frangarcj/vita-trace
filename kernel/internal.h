@@ -6,9 +6,12 @@
 #include "vita_tracy/kernel_events.h"
 #include "vita_tracy/state.h"
 #include "tick_source.h"
+#include "vita_tracy/control_gate.h"
 
 typedef struct VitaTracyKernelState {
     VitaTracyState state;
+    VitaTraceControlGate control;
+    uint32_t shutdown_requested;
 
     SceUID target_pid;
 
@@ -51,11 +54,14 @@ void vita_tracy_notify(VitaTracyKernelState *st);
 /* Releases the mapping and stops sampling. Safe to call repeatedly and
  * from the process-death path. */
 int vita_tracy_detach(VitaTracyKernelState *st);
+int vita_tracy_control_begin(VitaTracyKernelState *st);
+void vita_tracy_control_end(VitaTracyKernelState *st);
+void vita_tracy_target_exited(VitaTracyKernelState *st, SceUID pid);
 
 int vita_tracy_modules_snapshot(VitaTracyKernelState *st, SceUID pid);
 
 int vita_tracy_proc_events_register(VitaTracyKernelState *st);
-void vita_tracy_proc_events_unregister(VitaTracyKernelState *st);
+int vita_tracy_proc_events_unregister(VitaTracyKernelState *st);
 
 int vita_tracy_sampler_start(VitaTracyKernelState *st);
 int vita_tracy_sampler_stop(VitaTracyKernelState *st);

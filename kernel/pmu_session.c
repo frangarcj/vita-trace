@@ -58,7 +58,8 @@ static void record_error(VitaTracyKernelState *st, int error) {
 static void on_pmu_tick(void *context) {
     PmuCpu *cpu = (PmuCpu *)context;
     VitaTracyKernelState *st = cpu->state;
-    if (!__atomic_load_n(&g_recording, __ATOMIC_ACQUIRE) || cpu->failed) return;
+    if (!__atomic_load_n(&g_recording, __ATOMIC_ACQUIRE) || cpu->failed ||
+        vita_trace_control_pending(&st->control)) return;
     if ((uint32_t)ksceKernelCpuId() != cpu->cpu) {
         __atomic_fetch_add(&st->stats.pmu_wrong_cpu[cpu->cpu], 1u, __ATOMIC_RELAXED);
         return; // Never read another core's banked counters or write its SPSC ring.
