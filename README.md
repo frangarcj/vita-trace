@@ -8,8 +8,11 @@ application. CPU samples, module placements and process events come from an
 optional kernel plugin through shared rings, so the hot path never makes a
 syscall per event.
 
-> **Status:** early bring-up. It builds and the host test suite passes, but
-> nothing has run on a Vita yet. See `docs/implementation.md`.
+> **Status:** early bring-up. Zones/frames have been captured on hardware.
+> The ABI-2 event-driven bridge and timer-driven suspension diagnostic are
+> built and host-tested, but not yet hardware-validated. Non-intrusive PC
+> sampling remains unimplemented. See `docs/implementation.md` and
+> [sampling modes and limitations](docs/sampling.md).
 
 ## Layout
 
@@ -49,6 +52,13 @@ harmless. For firmware 3.63 and later, add `-DVITA_TRACY_FIRMWARE=363`.
 
 Link `tracy_vita` and instrument with the normal Tracy API:
 
+When included with `add_subdirectory`, sample applications default to off:
+
+```cmake
+add_subdirectory(path/to/vita-trace)
+target_link_libraries(my_homebrew PRIVATE tracy_vita)
+```
+
 ```cpp
 #include <tracy/Tracy.hpp>
 #include "vita_tracy/client.h"
@@ -56,17 +66,16 @@ Link `tracy_vita` and instrument with the normal Tracy API:
 int main() {
     vita_tracy_init();
 
-    // Optional: without tracy_kernel.skprx this fails and the app keeps
-    // producing zones, losing only samples and module metadata.
-    if (vita_tracy_kernel_attach(0, 0) == 0) {
-        vita_tracy_kernel_set_sampling(500);
-    }
+    // Zones do not require a plugin. Call vita_tracy_kernel_attach only
+    // after the matching plugin is known to be loaded: weak imports are
+    // NOT a safe residency probe. See docs/sampling.md for diagnostics.
 
     while (running) {
         ZoneScopedN("frame");
         ...
         FrameMark;
     }
+    vita_tracy_shutdown();
 }
 ```
 
@@ -75,6 +84,14 @@ since the protocol changes between versions.
 
 To turn sampled addresses back into functions, feed the module messages
 from the capture to `tools/symbol_map.py` along with the ELF.
+Use `--elf ModuleName=path` for each module in a multi-module capture. The
+tool reconstructs ELF virtual addresses from runtime segment placements;
+it does not assume the executable was linked at zero.
+
+ABI 2 requires reinstalling the rebuilt kernel plugin and application
+together. Timer-driven suspension diagnostics require explicit
+`VITA_TRACY_SAMPLING_ALLOW_SUSPEND` opt-in; a normal nonzero sampling request
+returns unsupported until a real interrupted-PC source is implemented.
 
 ## License
 

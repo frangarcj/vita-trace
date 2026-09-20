@@ -1,20 +1,19 @@
 # Implementation status
 
-Nothing here has run on a PS Vita yet. Everything below builds with the
-VitaSDK toolchain and the platform-independent logic is covered by the host
-test suite. The userland client has additionally been run end to end under
-Vita3K (see below); the kernel backend cannot be, for the reasons in
-`docs/reverse_engineering.md`.
+The original zones/frames path has run on a PS Vita and under Vita3K (see
+below). The ABI-2 bridge, explicit profiler-thread registry, timer-driven
+diagnostic and ELF resolver revision are built and host-tested, not yet
+validated on hardware. See `docs/sampling.md` for the precise boundaries.
 
 ## Phase status
 
 | Phase | State | Notes |
 |---|---|---|
 | 0 — Bring-up | **Verified on hardware** | A retail console captured over Wi-Fi: 556 frames, 554 zones in 12 s, timings self-consistent. |
-| 1 — Kernel bridge | Built | ABI v1, per-core SPSC rings, `ksceKernelProcUserMap`, process-event cleanup, module snapshots. |
-| 2 — Provisional samples | Built | Suspend/read/resume sampler, injected into Tracy as callstack samples. Offline symbolication in `tools/symbol_map.py`. |
-| 3 — Non-intrusive sampling | Not started | ScePamgr's ARM trace turned out to be CoreSight PTM, but the SoC exposes no ETB/ETR, so the trace has nowhere to land in RAM. Unless a sink is found, the options are a scheduler hook or the per-core memory-mapped PMU frames. |
-| 4 — PMU | Blocked from userland | Hardware reports PMUSERENR as 0 and refuses to load ScePerf, so the client-side path cannot work. Only the kernel can open the counters. |
+| 1 — Kernel bridge | Built, ABI-2 hardware validation pending | Explicit profiler PUID registry, event-driven drain/control, shared-ring layout checks and serialized control producers. |
+| 2 — Provisional samples | Explicit diagnostic only | SceSysTimer wakes the suspend/read/resume worker. No name-based exclusions; main is no longer the bridge's control caller. These are not unbiased CPU-time samples. |
+| 3 — Non-intrusive sampling | Not implemented | SceSysTimer supplies cadence but no interrupted register frame. A validated IRQ-context/PC adapter under the normal scheduler remains necessary. The PTM investigation is recorded in `docs/reverse_engineering.md`; importing pamgr alone does not establish a RAM trace sink. |
+| 4 — PMU | Built, untested on hardware | Client-side ScePerf path is dead (PMUSERENR reads 0, ScePerf can't load). `kernel/pmu.c` now opens PMUSERENR and programs PMCR/PMCNTENSET/PMXEVTYPER directly via CP15, per core, using a `SceThreadmgrForDriver` NID (`0x5053B005`) reverse-engineered from `threadmgr.elf` — see `docs/reverse_engineering.md`. Loading `tracy_kernel.skprx` itself is now on-demand via taiHEN (`samples/bringup`), gated behind the same marker file, rather than a permanent `ux0:tai/config.txt` entry. |
 | 5 — Callstacks | Phase A only | Samples carry a single PC. LR, stack snapshots and offline unwinding are not implemented. |
 | 6 — GPU / Razor | Not started | — |
 | 7 — Uninstrumented agent | Not started | `agent/` is empty. |
@@ -30,7 +29,7 @@ SceNet lazily on the first `socket()` call and tolerates an application that
 already called `sceNetInit`, which also settles the network-ownership
 question the design raised.
 
-**Tracy needed one patch, for the clock.** Tracy already has platform hooks
+**Tracy platform patches.** Tracy already has platform hooks
 for the allocator, thread ids, user info and safe copying, all used here.
 It has none for the clock, and its fallback resolves to
 `std::chrono::high_resolution_clock`, which on VitaSDK is the non-monotonic
@@ -38,21 +37,19 @@ wall clock behind `sceRtcGetTime_t`. `patches/tracy/` adds a
 `TRACY_PLATFORM_GET_TIME` hook alongside the existing
 `TRACY_PLATFORM_HEADER` mechanism, and the client feeds it the ScePerf
 timebase. CMake applies the patch idempotently at configure time.
+A second patch now adds POSIX worker lifecycle hooks, registering actual
+profiler thread IDs rather than excluding every application `pthread`.
 
-**PMU lives in the client, not the kernel.** ScePerf's ARM PMON functions
-are a userland library, so a kernel module cannot import them. Since the
-client can drive them per thread and plot the values directly, the counters
-never need to cross the ring. `vitaTracySetPmu` stays in the ABI for a
-privileged path that would drive the CP15 registers, and reports unsupported
-until the questions in the risk table are answered.
+**PMU is still experimental.** The original ScePerf userland path is not
+usable on retail. The kernel CP15 bring-up and cycle reader are preserved;
+they are not a finished per-thread profiler. The ABI-2 timer/drain revision
+does not replace that separate reader or implement its Tracy event forwarding.
 
-**The kernel acknowledges the mapping.** The design requires that an
-instrumented application keep working without the plugin, so the control ABI
-is imported weakly. What an unresolved weak import returns is not documented,
-and a zero return would be indistinguishable from success, leaving the client
-draining an empty ring and reporting a profile that is silently blank. The
-kernel therefore writes an acknowledgement into the shared header during
-`vitaTracyRegister`, and the client believes the call only when it sees it.
+**The kernel acknowledges the mapping.** The acknowledgement validates a
+completed registration, not module residency. An unresolved weak import is
+not safe to call on Vita; callers must establish that the matching kernel
+plugin is loaded before attachment. A missing initial clock-sync record is
+an error instead of silently choosing a zero clock reference.
 
 ## What still needs hardware
 
@@ -73,7 +70,9 @@ kernel therefore writes an acknowledgement into the shared header during
 
 ## What the hardware run showed
 
-`samples/bringup` on a retail 3.65 console, captured from a PC over Wi-Fi
+`samples/bringup` on a retail 3.60 console (confirmed from the console's own
+decrypted kernel modules — earlier notes said 3.65, which was wrong; see
+`docs/reverse_engineering.md`), captured from a PC over Wi-Fi
 with `tracy-capture` built from the pinned commit:
 
 ```

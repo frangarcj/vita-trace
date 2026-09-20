@@ -14,6 +14,7 @@ target_include_directories(bringup_sample PRIVATE
 target_link_libraries(bringup_sample
     tracy_vita
     SceDisplay_stub
+    taihen_stub
 )
 
 vita_create_self(bringup_sample.self bringup_sample UNSAFE)
