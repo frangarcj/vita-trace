@@ -41,9 +41,24 @@ Timer availability, routing, overhead and PMU persistence require console
 validation. A startup failure is included in Tracy AppInfo; it does not
 change the original main function's arguments or return value.
 
+For the experimental function-PC path, use this alternative instead of `PMU`:
+
+```cmake
+vita_tracy_enable(my_homebrew PC_SAMPLING FRAMES SAMPLE_HZ 100)
+```
+
+`PMU` and `PC_SAMPLING` are mutually exclusive because both own the cycle
+counter. `SAMPLE_HZ` selects the nominal overflow cadence at the ARM clock
+observed at startup, not a guaranteed wall-clock sampling rate. The kernel's
+`VITA_TRACY_IRQ_CORE_MASK` build option selects app cores (default 7; use 1
+for core-0 bring-up). The helper's `CORE_MASK` option applies only to `PMU`.
+After the first successful Excpmgr registration, the experimental plugin
+cannot be unloaded until reboot. Neither IRQ routing nor sampled-PC semantics
+has yet been established on a console.
+
 ## Plugin loading is an explicit prerequisite
 
-**A PMU-enabled executable requires the matching kernel plugin already loaded
+**A PMU- or PC_SAMPLING-enabled executable requires the matching kernel plugin already loaded
 before the process is launched.** The helper deliberately links strong kernel
 imports, ahead of the client's optional weak archive. This is a loader-level
 dependency, not a speculative call to an unresolved weak function.
@@ -55,8 +70,8 @@ version is not a cryptographic build identity; the runtime ABI/size checks
 still matter. Use the bring-up application's separate load and attach runs
 when managing the plugin manually.
 
-Without `PMU`, no kernel control call is made by the helper. Adding `PMU` is
-therefore a deliberate deployment choice, not an automatic presence probe.
+Without `PMU` or `PC_SAMPLING`, no kernel control call is made by the helper.
+Adding either is a deliberate deployment choice, not a presence probe.
 
 ## What the wrappers do
 
@@ -107,5 +122,5 @@ APIs, including unchanged arguments/results, startup errors, frame rejection
 and retryable shutdown. Vita builds validate the real SDK signatures, stubs,
 link order and SELF/VPK generation; they do not establish hardware behavior.
 
-A non-intrusive function profiler still requires a validated interrupted-PC
-source. This helper never enables the suspend diagnostic as a fallback.
+The `PC_SAMPLING` option explicitly selects the experimental interrupted-PC
+source. The helper never selects it or the suspend diagnostic as a fallback.

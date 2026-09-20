@@ -1,7 +1,8 @@
 # Implementation status
 
 The original zones/frames path has run on a PS Vita and under Vita3K (see
-below). The ABI-3 bridge, per-core timer-IRQ PMU capture, explicit profiler
+below). The ABI-4 bridge, per-core timer-IRQ PMU capture, experimental
+PMU-overflow PC sampling, explicit profiler
 thread registry, timer-driven diagnostic, automatic link-time integration
 and ELF resolver are built and host-tested, not yet validated on hardware.
 See `docs/sampling.md`, `docs/automatic.md` and `docs/hardware-validation.md`.
@@ -11,18 +12,28 @@ See `docs/sampling.md`, `docs/automatic.md` and `docs/hardware-validation.md`.
 | Phase | State | Notes |
 |---|---|---|
 | 0 — Bring-up | **Verified on hardware** | A retail console captured over Wi-Fi: 556 frames, 554 zones in 12 s, timings self-consistent. |
-| 1 — Kernel bridge | Built, ABI-3 hardware validation pending | Explicit profiler PUID registry, event-driven drain/control, separate PMU rings, retryable resource cleanup and serialized control operations. |
+| 1 — Kernel bridge | Built, ABI-4 hardware validation pending | Explicit profiler PUID registry, event-driven drain/control, separate PMU rings, retryable resource cleanup and serialized control operations. |
 | 2 — Provisional samples | Explicit diagnostic only | SceSysTimer wakes the suspend/read/resume worker. No name-based exclusions; main is no longer the bridge's control caller. These are not unbiased CPU-time samples. |
-| 3 — Non-intrusive sampling | Not implemented | SceSysTimer supplies cadence but no interrupted register frame. A validated IRQ-context/PC adapter under the normal scheduler remains necessary. The PTM investigation is recorded in `docs/reverse_engineering.md`; importing pamgr alone does not establish a RAM trace sink. |
+| 3 — Non-intrusive sampling | Experimental backend built, hardware validation pending | PMCCNTR overflow drives an IRQ observer registered with SceExcpmgr. The exception context supplies PC/SP/LR/SPSR and `ksceKernelGetThreadContextInfo` supplies PID/global TID. GUID→PUID resolution happens later in the user worker. The public API has no Excpmgr unregister operation, so first use intentionally pins the plugin resident until reboot. |
 | 4 — PMU | Built and host-tested, no new hardware run | `kernel/pmu_session.c` reads cycles/events from per-core system-timer callbacks. Short pinned jobs acquire/restore registers; no resident polling thread or PMUSERENR writes. Timestamped whole-core deltas reach Tracy. |
-| 5 — Callstacks | Phase A only | The diagnostic record carries PC/SP/LR, but Tracy receives only one PC. Stack snapshots and offline unwinding are not implemented. |
+| 5 — Callstacks | Phase A only | Both diagnostic and IRQ records carry PC/SP/LR, but Tracy currently receives only one PC. Stack snapshots and offline unwinding are not implemented. |
 | 6 — GPU / Razor | Not started | — |
 | 7 — Uninstrumented agent | Not started | `agent/` is empty. |
 
 Link-time integration is available separately: `vita_tracy_enable(target
 PMU FRAMES)` wraps startup/exit and optional display submissions without
-source edits. It still requires rebuilding/relinking the HB, and does not
-make phase 3 or the injection agent complete.
+source edits. `PC_SAMPLING FRAMES SAMPLE_HZ 100` is the explicit experimental
+alternative, not an additional option to combine with PMU. Both still require
+rebuilding/relinking the HB; neither completes hardware validation or the
+injection agent.
+
+The client uses statically initialized native pthread locks for lifetime,
+worker registration, control and automatic-frame emission. The guard refuses
+to proceed unlocked when a pthread operation fails. IRQ callback admission is
+tracked per core; stop retains shared state while a callback is in flight.
+Backend cleanup remains reachable even after a failed start has left the
+logical sampling state STOPPED. Host tests cover these cases and an alternate
+kernel build selecting only core 0.
 
 ## Decisions that departed from the design
 
@@ -80,9 +91,11 @@ an error instead of silently choosing a zero clock reference.
   survives helper-thread exit/context switches, and its actual overhead.
 - What high-resolution clock is reachable without ScePerf. The process timer
   works but is microseconds; the kernel plugin is the likely answer.
-- A validated interrupted-register adapter for non-intrusive PC sampling.
-  A scheduler hook alone would not sample a long-running thread between
-  context switches. See `docs/sampling.md` for the current API limitations.
+- Hardware proof that PMU overflow reaches the expected core's IRQ path, that
+  Excpmgr's saved instruction address has the expected IRQ semantics, and that
+  the observer coexists with normal interrupt load at useful rates. A scheduler
+  hook alone would not sample a long-running thread between context switches.
+  See `docs/sampling.md` for the acceptance gates.
 
 ## What the hardware run showed
 

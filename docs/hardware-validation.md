@@ -36,7 +36,7 @@ snapshots at manifest creation, not proof that the supplied files were built
 from that revision or compiler. Save local patches and untracked sources
 separately; their original contents cannot be reconstructed from hashes.
 
-ABI 3 requires a matching plugin/client pair. Exported library version 25
+ABI 4 requires a matching plugin/client pair. Exported library version 25
 is not an exact build identifier. Build both from the tested commit and
 replace the provider only while no client is running or using its imports.
 The CMake PMU integration uses strong imports and requires the provider at
@@ -47,6 +47,26 @@ Use a recoverable test setup rather than putting an unverified plugin on a
 permanent boot path. Host failure-injection tests do not make kernel mistakes
 harmless: a console hang or restart remains possible. Save unrelated work.
 
+## Initial core-0 IRQ build
+
+With VitaSDK configured, build the experimental kernel for one app core first:
+
+```sh
+cmake -S . -B build-irq-core0 -DVITA_TRACY_IRQ_CORE_MASK=1
+cmake --build build-irq-core0 --target tracy_kernel.skprx-self
+```
+
+Rebuild the matching HB from the same revision and verify
+`sample_irq_core_mask == 1`. This option affects only the IRQ PC backend;
+the timer-PMU mode keeps its separate runtime mask. Repeat later with mask 7
+to cover app cores 0..2. Do not equate the nominal cycle period with measured
+wall-clock cadence, especially when CPU clocks change during a run.
+
+The experimental Excpmgr stub places writable registration words next to
+executable code. The current linker therefore warns about a LOAD segment with
+RWX permissions. This is a known property of this implementation, not a clean
+security audit or a warning to suppress without reviewing the registration ABI.
+
 ## Acceptance matrix
 
 Advance only after the preceding layer produces understandable results.
@@ -56,6 +76,10 @@ Advance only after the preceding layer produces understandable results.
 | Client only | Enable `FRAMES`, no kernel attach, capture with the pinned Tracy viewer | The original application runs unchanged; successful display submissions are visible; failed display calls do not manufacture frames. |
 | Lifecycle | Repeat init, normal return, `exit`, wrapped `sceKernelExitProcess`, repeated launches | No second clock adoption while Tracy is live; no obvious stuck worker or growing resource use. Static constructors/destructors must not emit Tracy events in automatic mode. |
 | Mapping/control | Attach without PMU or PC sampling; request stats; checked detach | Clock sync and module maps arrive, commands complete, memory remains valid until confirmed detach. Reattach creates an independent session. |
+| IRQ sampler registration | Explicitly request `VITA_TRACY_SAMPLING_PMU_IRQ` at 10 Hz first | Start succeeds, `sample_irq_handler_registered=1`, ARM MHz/core mask are plausible, and the console remains responsive. This first successful registration pins the plugin resident until reboot. |
+| IRQ delivery | Run a CPU-bound worker pinned in turn to cores 0, 1 and 2 | `sample_irq_calls` and `sample_irq_overflows` advance on the executing core and samples arrive. If overflow state advances but no IRQ callback is observed, stop: PMUIRQ routing is not established. |
+| IRQ PC semantics | Use noinline functions with known address ranges and alternating work ratios | Sample PCs land inside the currently executing function after Thumb normalization; SP/LR are plausible. Do not infer an adjustment to the saved PC from one sample. |
+| IRQ thread identity | Exercise main, native workers and `std::thread`, with thread creation/destruction during capture | GUID→PUID resolution follows the right Tracy threads, ordinary pthread workers remain visible and profiler workers remain filtered. Reused GUIDs must not produce persistent stale attribution. |
 | Minimal PMU | Explicit cycle-only config, core 0 only, 10 Hz | IRQs land on core 0; `pmu_wrong_cpu` stays zero; actual interval and counters are plausible under alternating busy/idle work. |
 | Event PMU | Add the six configured events; compare intentionally different cache/branch workloads | Event labels and selected slots agree, changes are reproducible; renamed instructions are not labeled retired instructions. |
 | Multiple cores | Select 0..2 at 100 Hz, pin application workers to known cores | Per-core activity responds to placement. Counts remain whole-core, not falsely assigned to one application thread. CPU 3 is a separate opt-in experiment. |
@@ -64,7 +88,7 @@ Advance only after the preceding layer produces understandable results.
 | PMU conflicts | Start with a different PMU owner present; change configuration during a run | Acquisition refuses occupied registers. Detected ownership loss clears the core's active bit, stops its reader and does not restore over the observed new configuration. Identical third-party programming cannot be detected. |
 | Stop/retry | Repeated PMU start/stop and checked detach, including busy/error returns | A failed cleanup retains resources and can be retried. No new session is admitted over retained old resources. IRQ activity stops before mappings disappear. |
 | Process death | Terminate a test HB while capture is active, then relaunch | Backend cleanup is coherent, no old callback cleans up a different process, and a later session can attach. A forced kill need not deliver a final network capture. |
-| Plugin unload | Only after all clients exit, repeat unload and inspect return values | No callbacks/import calls remain in flight; cancellation/error is handled by retry rather than assuming memory was released. |
+| Plugin unload | Before any IRQ-sampler use, unload normally; after first successful IRQ-handler registration, try again only as a validation check | Before registration normal cleanup applies. After registration unload must be refused because VitaSDK exposes no Excpmgr unregister API; reboot is the supported removal path. |
 | Register preservation | Run an application-side deterministic NEON/VFP workload before/during/after PMU | Checksums/results match. Absence of FP instructions in the plugin alone is not sufficient evidence about the firmware's complete interrupt path. |
 | Duration/overhead | Baseline, client without viewer, client with viewer, ring only, then PMU; repeat 30+ minutes | Report overhead as measured distributions and resource deltas, with drops/errors. No performance number is claimed before these runs. |
 
@@ -74,13 +98,19 @@ Useful counters: `pmu_active_mask`, `pmu_last_error`, per-core
 atomic counters, not a simultaneous cross-core snapshot. PMU records include
 the actual interval and sequence. A stopped or failed reader is not zero CPU
 work, and aggregate low-32-bit legacy totals are not a wall-clock estimator.
+For experimental PC sampling also record per-core `sample_irq_calls`,
+`sample_irq_overflows`, `sample_irq_not_target`, `sample_irq_kernel`,
+`sample_irq_context_errors`, plus `sample_irq_arm_mhz`,
+`sample_irq_core_mask` and `sample_irq_last_error`.
 
 ## Keep intrusive diagnostics separate
 
-Ordinary nonzero PC sampling still returns unsupported. Only
-`VITA_TRACY_SAMPLING_ALLOW_SUSPEND` requests the provisional suspend/read/
-resume diagnostic. It can perturb scheduling and locks or hang the target.
-Do not use its percentages to validate the PMU or claim unbiased CPU sampling.
+Ordinary nonzero PC sampling still returns unsupported. The two experimental
+paths are always explicit: `VITA_TRACY_SAMPLING_PMU_IRQ` requests the
+non-suspending PMU-overflow path, while `VITA_TRACY_SAMPLING_ALLOW_SUSPEND`
+requests the provisional suspend/read/resume diagnostic. They are mutually
+exclusive. The latter can perturb scheduling and locks or hang the target.
+Do not use its percentages to validate the IRQ sampler or PMU.
 
 The synthetic workload covers main, pthread, native workers and a sleeping
 thread. The explicit registry must exclude only profiler workers. Samples
@@ -88,7 +118,7 @@ from the suspension diagnostic carry unknown CPU: ring 0 is transport, not
 proof of execution on core 0. A resume failure stops further scans and may
 require restarting the process.
 
-## Interrupted-PC adapter: required evidence before implementation
+## Interrupted-PC adapter: evidence required before promoting it
 
 The installed VitaSDK declares:
 
@@ -96,25 +126,25 @@ The installed VitaSDK declares:
   user data, not the interrupted register frame.
 - `psp2kern/kernel/threadmgr/debugger.h`: `ksceKernelGetThreadContextInfo`
   supplies PID/TID in exception context; `ksceKernelGetThreadCpuRegisters`
-  requires a suspended thread. Neither is a demonstrated general timer-PC API.
+  requires a suspended thread. The experimental backend only uses the former.
 - `psp2kern/kernel/excpmgr.h`: an exception-context structure and handler
   registration exist, but this header does not provide a corresponding
-  unregister API or prove that ordinary system-timer IRQ delivery passes
-  through that handler chain with that structure.
+  unregister API. The experimental backend therefore refuses module unload
+  after registration rather than guessing at internal list manipulation.
 
-Before connecting a PC producer, inspect the actual firmware IRQ entry,
-stack/frame construction, dispatch, nesting and return paths. Establish
-which saved PC/CPSR/SP/LR belong to the interrupted application, distinguish
-user/kernel execution, normalize ARM/Thumb PC semantics, and validate the
-same CPU's PID/TID. Establish complete quiescence/unregistration so a plugin
-can never be unloaded while its handler can run.
+The host implementation uses PMOVSR as the source discriminator and the
+documented exception fields rather than a guessed stack offset. Hardware must
+still establish which saved PC/SP/LR semantics apply specifically to an IRQ,
+that PMUIRQ reaches the observer on each selected core, and that
+`ksceKernelGetThreadContextInfo` agrees with a known running thread. The
+backend distinguishes PL0 user mode via SPSR and resolves global TIDs outside
+IRQ context; those assumptions need console evidence before becoming default.
 
 A callback-local PC, a guessed stack offset, or unsuspended debugger-register
-reads are not acceptable substitutes. Hooking all exceptions simply because
-an enum includes IRQ is not evidence of correct timer context capture.
-A future decoder can be host-tested with recorded frames, but the recordings
-and hook contract must first be tied to supported firmware. Scheduler events
-would complement periodic sampling, not replace it for a long-running thread.
+reads remain unacceptable substitutes. Host tests prove filtering, PMU
+ownership, rollback and transport; they do not prove the firmware's IRQ
+contract. Scheduler events would complement periodic sampling, not replace it
+for a long-running thread.
 
 ## Bisect a behavior, not the whole feature set
 
@@ -141,3 +171,22 @@ useful for some regressions than a newly introduced sample.
 Host tests can automate the portable portion of the bisect. A passing build
 is not a passing console run, and a failure to load a deliberately mismatched
 plugin/client pair is not evidence of a sampling regression.
+
+## Recovery checkpoint after fcf17ac
+
+The direct-checkout continuation added these independently testable boundaries:
+
+| Commit | Change |
+|---|---|
+| `3c12c6f` | Statically initialized native locks for client lifetime, registry and bridge; explicit stdio include fixes the host build. |
+| `fcc8ed0` | Per-core IRQ admission and retained state when stop races an active callback. |
+| `20e8ada` | Backend cleanup remains reachable after failed startup, even in the logical STOPPED state. |
+| `6a8dce2` | Build-selectable app-core mask; an independently compiled core-0 backend is host-tested. |
+| `dad5f17` | Automatic frame emission uses the same native-lock lifetime policy. |
+
+At this checkpoint, 190 CTest entries passed normally and with AddressSanitizer
+and UndefinedBehaviorSanitizer. Leak detection was disabled for the sanitizer
+run; ThreadSanitizer was not run. These tests include fake firmware APIs and
+synthetic exception frames, not real IRQ recordings. Cross-builds produced
+the normal Vita targets and kernel variants for 3.63+ and core 0 only. A mask
+of 8 was rejected at CMake configuration. No new console validation was done.

@@ -1,4 +1,4 @@
-# Whole-core PMU capture (ABI 3)
+# Whole-core PMU capture (ABI 4)
 
 This backend is built and host-tested, not yet tested on a physical console.
 The old PMUSERENR experiment and core-0 polling loop are preserved in commit
@@ -58,7 +58,7 @@ assumption to test.
 
 ## Transport and viewer
 
-Each ABI-3 shared block adds four PMU rings of 128 records, separate from PC
+Each ABI-4 shared block adds four PMU rings of 128 records, separate from PC
 samples and the serialized control ring. Records carry CPU, sequence, timestamp,
 actual interval, cycles, event encodings and deltas. Capacity overflow drops
 rather than blocks and is included in the visible dropped-record count.

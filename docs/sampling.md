@@ -1,4 +1,4 @@
-# Sampling and transport (ABI 3)
+# Sampling and transport (ABI 4)
 
 ## What this revision changes
 
@@ -36,16 +36,66 @@ If allocation/configuration fails, sampling returns an error; there is no
 silent fallback to a delay loop. A failed timer release retains the handles
 and prevents module unload until release succeeds.
 
-## A timer is not an interrupted PC
+## Experimental interrupted-PC sampling
 
 `SceSysTimerCallback(timer_id, user_data)` does not receive the interrupted
-register frame. The IRQ-to-PC adapter is still unimplemented. Reading the
-callback's own PC or calling the suspended-thread API on a running thread
-would not fix that.
+register frame, so the diagnostic timer is not reused as a fake PC source.
+The experimental backend instead uses the PMU cycle counter overflow and an
+`SCE_EXCP_IRQ` observer registered through SceExcpmgr. The VitaSDK exception
+context contains PC/SP/LR/SPSR, while `ksceKernelGetThreadContextInfo` is
+explicitly documented for identifying the thread interrupted by an exception.
 
-`vita_tracy_kernel_set_sampling(hz)` therefore requests a non-intrusive
-source and currently returns `VITA_TRACY_ERROR_UNSUPPORTED` for nonzero rates.
-It does not silently suspend the application. Passing zero stops sampling.
+`vita_tracy_kernel_set_sampling(hz)` deliberately continues to return
+`VITA_TRACY_ERROR_UNSUPPORTED` for nonzero rates. The unvalidated backend is
+never selected implicitly. Passing zero stops sampling.
+
+Explicit experimental opt-in is:
+
+```cpp
+int result = vita_tracy_kernel_set_sampling_ex(
+    500, VITA_TRACY_SAMPLING_PMU_IRQ);
+```
+
+The backend prepares the cycle counter on the selected app cores while its interrupt
+is still disabled, registers the exception observer only after all requested
+cores are available, then arms them. Existing PMU counter/interrupt owners are
+refused rather than overwritten. A PMU overflow is identified from PMOVSR,
+cleared and reloaded on the same core; unrelated IRQs do not enter Threadmgr.
+Kernel-mode and other-process overflows are serviced but not emitted.
+
+The kernel build defaults to app cores 0..2. For initial hardware validation,
+configure with `-DVITA_TRACY_IRQ_CORE_MASK=1` to select only core 0. Values
+1..7 are decimal bitmasks; no system-core selection is accepted in this backend.
+The mask is kernel-wide, recorded in `sample_irq_core_mask`, and does not
+change the control ABI. `SAMPLE_HZ` is converted into a cycle period once,
+using the ARM clock read at startup. Clock changes, idle behavior and handler
+latency can therefore change the achieved wall-clock cadence.
+
+Callback admission is atomic per core, preventing two simultaneous producers
+from writing the same sample ring. Stop disables emission and retains the
+session with `BUSY` if a callback is in flight. After the per-core cleanup
+jobs disable/restore the banks, admission closes and a final check precedes
+releasing shared state. Failed startup also retains its backend selection:
+stop, detach and reconfiguration cannot skip cleanup just because the logical
+state is already STOPPED. These are host-tested rules, not proof that firmware
+IRQ dispatch, nesting or register restoration obeys the assumed contract.
+
+The IRQ record carries the global thread UID because converting it to Tracy's
+process-local PUID is not documented as exception-safe. The user drain worker
+resolves GUID→PUID through a control call for every sample. VitaSDK exposes no
+public thread lifecycle observer that could safely invalidate a persistent
+GUID cache, so this revision chooses explicit worker-side syscall overhead over
+stale attribution after UID reuse. Hardware measurements will decide whether
+that needs an event-driven kernel resolver later. Resolved profiler workers are
+filtered; resolution failure drops the sample instead of inventing attribution.
+
+This path is **not production-ready until hardware validation**. We still need
+to prove that retail firmware routes Cortex-A9 PMU overflow into this IRQ path,
+that `address_of_faulting_instruction` is the correct interrupted PC for IRQ,
+and that the observer's overhead is acceptable. SceExcpmgr exposes handler
+registration but no public unregister call: after first successful registration
+the plugin intentionally refuses module unload until reboot, even after sampling
+is stopped, so no dangling handler can remain.
 
 The provisional diagnostic is explicitly opt-in:
 
@@ -53,7 +103,7 @@ The provisional diagnostic is explicitly opt-in:
 #include "vita_tracy/abi.h"
 #include "vita_tracy/client.h"
 
-// Only after the matching ABI-3 plugin is known to be loaded.
+// Only after the matching ABI-4 plugin is known to be loaded.
 int attached = vita_tracy_kernel_attach(0, 0);
 if (attached == 0) {
     int result = vita_tracy_kernel_set_sampling_ex(
@@ -131,7 +181,7 @@ prove that the firmware's timer-free function has the assumed IRQ semantics.
 ## Compatibility and lifetime
 
 Rebuild the client, kernel plugin and sample applications together. The
-shared/control ABI is now version 3 and the exported library version is 25.
+shared/control ABI is now version 4 and the exported library version is 25.
 Do not run a new client against an old plugin or vice versa.
 
 Weak imports allow an application to load without the plugin; they do not

@@ -9,9 +9,11 @@ optional kernel plugin through shared rings, so the hot path never makes a
 syscall per event.
 
 > **Status:** early bring-up. Zones/frames have been captured on hardware.
-> The ABI-3 event-driven bridge, per-core timer-IRQ PMU capture and automatic
+> The ABI-4 event-driven bridge, per-core timer-IRQ PMU capture and automatic
 > link-time integration are built and host-tested, but not hardware-validated.
-> Non-intrusive PC sampling remains unimplemented. See `docs/implementation.md` and
+> An experimental PMU-overflow/Excpmgr PC sampler is now built and host-tested
+> too; it remains explicit opt-in until its IRQ routing and saved-PC semantics
+> are verified on a console. See `docs/implementation.md` and
 > [sampling modes and limitations](docs/sampling.md).
 
 ## Layout
@@ -68,7 +70,14 @@ mode requires the matching kernel plugin loaded before launching the HB.**
 It links strong imports and never probes an unresolved weak import. `FRAMES`
 marks successful display submissions, not GPU duration. See
 [automatic integration](docs/automatic.md) for deployment and lifetime
-limits. This is not yet uninstrumented function-level PC sampling.
+limits. PMU plots are whole-core counters, not function-level samples.
+
+An experimental function-PC alternative is
+`vita_tracy_enable(my_homebrew PC_SAMPLING FRAMES SAMPLE_HZ 100)`.
+It also requires the matching plugin at launch, cannot be combined with `PMU`,
+and pins the plugin resident until reboot after successful IRQ registration.
+Use `-DVITA_TRACY_IRQ_CORE_MASK=1` when building the kernel for initial core-0
+validation. This path has not been validated on hardware.
 
 For manual lifetime and zones, link `tracy_vita` and use the normal Tracy API:
 
@@ -108,10 +117,11 @@ Use `--elf ModuleName=path` for each module in a multi-module capture. The
 tool reconstructs ELF virtual addresses from runtime segment placements;
 it does not assume the executable was linked at zero.
 
-ABI 3 requires reinstalling the rebuilt kernel plugin and application
+ABI 4 requires reinstalling the rebuilt kernel plugin and application
 together. Timer-driven suspension diagnostics require explicit
-`VITA_TRACY_SAMPLING_ALLOW_SUSPEND` opt-in; a normal nonzero sampling request
-returns unsupported until a real interrupted-PC source is implemented.
+`VITA_TRACY_SAMPLING_ALLOW_SUSPEND` opt-in. Experimental non-intrusive
+sampling requires `VITA_TRACY_SAMPLING_PMU_IRQ`; a normal nonzero request
+still returns unsupported rather than silently selecting an unverified backend.
 See [hardware validation and bisecting](docs/hardware-validation.md) before
 testing the new kernel paths on a console.
 
