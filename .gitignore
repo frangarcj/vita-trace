@@ -8,3 +8,5 @@ build-*/
 *.elf
 CMakeCache.txt
 CMakeFiles/
+__pycache__/
+*.py[cod]

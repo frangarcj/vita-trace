@@ -15,7 +15,9 @@ capture, one per segment:
 from __future__ import annotations
 
 import argparse
+import os
 import re
+import struct
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -77,6 +79,8 @@ class ModuleMap:
         )
 
         module = self._modules.get(name)
+        if module is not None and module.nid != nid:
+            raise ValueError(f"module {name} changed NID; split captures before resolving symbols")
         if module is None:
             module = Module(name=name, nid=nid)
             self._modules[name] = module
@@ -109,23 +113,89 @@ class ModuleMap:
         return None
 
 
-def resolve_with_addr2line(elf: str, offset: int, addr2line: str) -> str | None:
-    """Asks addr2line for function:file:line at a module-relative offset."""
+@dataclass(frozen=True)
+class ElfSegment:
+    vaddr: int
+    memsz: int
+    flags: int
+
+
+class ElfImage:
+    """The PT_LOAD table of a little-endian ARM ELF32, in loader order."""
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+        self.segments: list[ElfSegment] = []
+        with open(path, "rb") as handle:
+            size = os.fstat(handle.fileno()).st_size
+            header = handle.read(52)
+            if len(header) != 52 or header[:7] != b"\x7fELF\x01\x01\x01":
+                raise ValueError(f"{path}: expected a little-endian ELF32")
+            fields = struct.unpack("<16sHHIIIIIHHHHHH", header)
+            if fields[2] != 40 or fields[3] != 1 or fields[8] < 52:
+                raise ValueError(f"{path}: expected an ARM ELF header")
+            phoff, phentsize, phnum = fields[5], fields[9], fields[10]
+            if phentsize < 32 or not 0 < phnum < 65535:
+                raise ValueError(f"{path}: unsupported program header table")
+            if phoff < 52 or phoff + phnum * phentsize > size:
+                raise ValueError(f"{path}: truncated program header table")
+            for i in range(phnum):
+                handle.seek(phoff + i * phentsize)
+                kind, offset, vaddr, _, filesz, memsz, flags, _ = struct.unpack(
+                    "<8I", handle.read(32)
+                )
+                if kind != 1:  # PT_LOAD; do not count NOTE/EXIDX/etc. as segments.
+                    continue
+                if filesz > memsz or offset + filesz > size or vaddr + memsz > 1 << 32:
+                    raise ValueError(f"{path}: invalid PT_LOAD segment")
+                self.segments.append(ElfSegment(vaddr, memsz, flags))
+        if not self.segments:
+            raise ValueError(f"{path}: no loadable segments")
+
+    def address(self, resolution: Resolution) -> int:
+        if not 0 <= resolution.segment < len(self.segments):
+            raise ValueError(f"{self.path}: no PT_LOAD for runtime segment {resolution.segment}")
+        segment = self.segments[resolution.segment]
+        if not 0 <= resolution.offset < segment.memsz or not segment.flags & 1:
+            raise ValueError(f"{self.path}: PC outside executable PT_LOAD; check the ELF build")
+        return segment.vaddr + resolution.offset
+
+
+def load_elfs(specs: list[str], module_map: ModuleMap) -> dict[str, ElfImage]:
+    """Never silently apply one module's symbols to another module."""
+    names = {module.name for module in module_map.modules}
+    result: dict[str, ElfImage] = {}
+    for spec in specs:
+        if "=" in spec:
+            name, path = spec.split("=", 1)
+        elif len(names) == 1:
+            name, path = next(iter(names)), spec
+        else:
+            raise ValueError("multiple modules: specify --elf MODULE=path for each ELF")
+        if name not in names or name in result or not path:
+            raise ValueError(f"unknown, duplicate or empty ELF mapping: {spec}")
+        result[name] = ElfImage(path)
+    return result
+
+
+def resolve_with_addr2line(elf: str, address: int, addr2line: str) -> str | None:
+    """addr2line expects an ELF virtual address, not a segment-relative offset."""
     try:
         output = subprocess.run(
-            [addr2line, "-f", "-C", "-e", elf, hex(offset)],
+            [addr2line, "-f", "-C", "-e", elf, hex(address)],
             capture_output=True,
             text=True,
             check=False,
+            timeout=10,
         )
-    except OSError:
+    except (OSError, subprocess.TimeoutExpired):
         return None
 
     if output.returncode != 0:
         return None
 
     parts = output.stdout.strip().splitlines()
-    if len(parts) < 2:
+    if len(parts) < 2 or parts[0] == "??":
         return None
     return f"{parts[0]} at {parts[1]}"
 
@@ -143,7 +213,8 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="program counter to resolve, may be repeated",
     )
-    parser.add_argument("--elf", help="ELF to resolve offsets against")
+    parser.add_argument("--elf", action="append", default=[],
+                        help="MODULE=path to the matching ELF; repeat for multiple modules")
     parser.add_argument(
         "--addr2line",
         default="arm-vita-eabi-addr2line",
@@ -152,31 +223,49 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     module_map = ModuleMap()
-    with open(args.messages, "r", encoding="utf-8", errors="replace") as handle:
-        found = module_map.load_messages(handle)
+    try:
+        with open(args.messages, "r", encoding="utf-8", errors="replace") as handle:
+            found = module_map.load_messages(handle)
+        elfs = load_elfs(args.elf, module_map)
+        pcs = [(raw, int(raw, 0)) for raw in args.pc]
+        if any(not 0 <= pc < 1 << 32 for _, pc in pcs):
+            raise ValueError("PC must fit in 32 bits")
+    except (OSError, ValueError) as exc:
+        parser.error(str(exc))
 
     if found == 0:
         print("no module placements found in the capture", file=sys.stderr)
         return 1
 
-    for raw_pc in args.pc:
-        pc = int(raw_pc, 0)
-        resolution = module_map.lookup(pc)
+    failed = False
+    for raw_pc, pc in pcs:
+        # LR/function pointers may carry the Thumb-state bit. Keep the raw
+        # address in the report, but resolve the instruction address.
+        resolution = module_map.lookup(pc & ~1)
         if resolution is None:
             print(f"{raw_pc}: no module covers this address")
+            failed = True
             continue
 
         line = (
             f"{raw_pc}: {resolution.module}+0x{resolution.offset:X} "
             f"(seg {resolution.segment})"
         )
-        if args.elf:
-            symbol = resolve_with_addr2line(args.elf, resolution.offset, args.addr2line)
-            if symbol:
-                line += f" -> {symbol}"
+        image = elfs.get(resolution.module)
+        if image:
+            try:
+                symbol = resolve_with_addr2line(image.path, image.address(resolution), args.addr2line)
+                line += f" -> {symbol or 'unresolved (check symbols and addr2line)'}"
+                failed |= symbol is None
+            except ValueError as exc:
+                line += f" -> {exc}"
+                failed = True
+        elif elfs:
+            line += " -> no ELF supplied for this module"
+            failed = True
         print(line)
 
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
