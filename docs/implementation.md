@@ -38,7 +38,8 @@ kernel build selecting only core 0.
 The kubridge comparison exposed the missing raw exception-entry contract in
 the old branch-only stub. Five instruction-level ARM/Thumb tests now execute
 the replacement entry, in addition to the C-level tests. Four firmware-sensitive
-exports are resolved via taiHEN before startup; IRQ paths never perform lookups.
+exports are resolved via taiHEN on the first register syscall (not in `module_start`,
+which hangs the 3.60 console); IRQ paths never perform lookups.
 Sparse module segment ordinals are preserved for symbolication.
 
 ## Decisions that departed from the design

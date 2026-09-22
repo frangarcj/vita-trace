@@ -290,3 +290,13 @@ Primary API references:
 - https://docs.vitasdk.org/systimer_8h_source.html
 - https://docs.vitasdk.org/debugger_8h_source.html
 - https://docs.vitasdk.org/ommon_2kernel_2threadmgr_8h.html
+
+
+## Hardware status 2026-09-23
+
+The PMU-overflow PC sampler's kernel side is validated on the retail 3.60
+console up to and including overflow delivery from user threads at the
+configured rate (see `docs/hardware-validation.md` and `docs/pmu.md`). Sample
+emission, PC attribution and the viewer path have not been exercised yet on
+hardware because the bring-up application gets suspended about eight seconds
+into its measurement loop for a reason that is still unidentified.

@@ -1,6 +1,8 @@
 # Console validation and bisecting the profiler series
 
-The new PMU/bridge/automatic integration has not been run on a console.
+The new PMU/bridge/automatic integration was first run on the retail 3.60
+console on 2026-09-22; see the session log at the end of this document. The
+only earlier hardware-tested commit is `86bcdc6` (zones/frames only).
 Host tests and cross-compilation do not establish firmware IRQ routing,
 counter persistence, latency, safe teardown or acceptable overhead.
 
@@ -225,3 +227,53 @@ policy as auto/360, not a distinct fixed-NID binary. The ELF has no versioned
 ForKernel import sections. RWX chain storage remains, and installed import
 stubs also cause the linker's missing GNU-stack-note warning. These warnings
 have not been represented as solved by the entry tests.
+
+## Console session 2026-09-22 (retail 3.60, core-0 kernel build, HEAD 8969948 + fixes)
+
+Setup: `tracy_kernel.skprx` from `build-vita-core0` (`VITA_TRACY_IRQ_CORE_MASK=1`)
+loaded on demand by the bring-up sample from `ux0:data/`, VitaCompanion for
+launch/kill/reboot, reports fetched over FTP. Three consecutive kernel loads
+required three reboots; the console recovered from all of them via ensō.
+
+| Step | Result |
+|---|---|
+| Client only (bring-up, no kernel load) | Passes: ABI 4 client starts, report written stage by stage, zones/frames loop runs. |
+| Kernel load at HEAD | **Hang.** `taiLoadStartKernelModule` never returned, core 1 at 100%, process unkillable, no crash dump, reboot required. Cause: taiHEN `module_get_export_func` called from `module_start`. Fixed by deferring resolution to the first `vitaTracyRegister`. |
+| Kernel load after the fix | Passes (`0x40010139`). `taiStopUnloadKernelModule` of the stored modid now returns `SCE_KERNEL_ERROR_INVALID_UID`; reloading the same library version then fails with `OLD_LIB`. Bump the exported library version on every rebuild (now 26). |
+| Attach, first attempt | `VITA_TRACY_ERROR_UNSUPPORTED` (seen as `0xBFFFFFFA`: bit 30 of the syscall return flipped again). Cause: wrong module names in the lookup (`SceModulemgr`/`SceThreadmgr`); fixed to `SceKernelModulemgr`/`SceKernelThreadMgr`. |
+| Attach, second attempt | Register, ring map, module snapshot and clock sync all reach the client, then the `VitaTracyDrain` thread aborts: Tracy's `TaggedUserlandAddress` assert in `TracyMessage`/`TracyAppInfo`, because GCC sign-extends pointer-to-`uint64_t` on ARM32 and Vita user addresses start at `0x81000000`. Fixed by `patches/tracy/0003-tagged-address-zero-extend-32bit.patch`. |
+| Attach, third attempt | Passes: attach 0, `configure_pmu` 0, `PmuSampleStart` 0, stats returned, no crash dump. |
+| Timer PMU readers (cores 0..2, 100 Hz, six events) | **Fail on the first tick on every core**: `pmu_counter_errors` = 1 per core, `pmu_active_mask` = 0, last error `-3` (ownership lost), `pmu_wrong_cpu` = 0. Acquisition itself succeeded (PMCNTENSET and PMINTENSET were 0 at boot). The bank programmed by the per-core job thread is not what the systimer callback sees on the same core: consistent with the 2026-08-21 PMUSERENR observation, the firmware appears to save and restore PMU state per thread (ScePerf's per-thread counters). Whole-core counting from a foreign thread context therefore does not work as built. Not yet isolated register by register. |
+| Process death with an active PMU session | **Hang.** `destroy` (app kill) never completes: the eboot stays locked, SceShell stops answering VitaCompanion, reboot needed. Suspect the proc-event kill callback running `vita_tracy_detach` (timer free plus per-core release jobs with `ksceKernelWaitThreadEnd`) in the kill path. Not yet isolated. |
+| IRQ sampler registration (bring-up, `PMU_IRQ|IRQ_REGISTER_ONLY`, 10 Hz, core-0 kernel v33) | **Passes.** `ksceExcpmgrRegisterHandler(SCE_EXCP_IRQ, 0, node)` returns 0 and links `next=0x008DC138`; after 2 s the raw node has counted 2079 IRQs on core 0 and tail-chained every one, console fully responsive, stop returns 0. Two things had to change first: the node and entry now live in `.text` like kubridge's (registering a node in the RWX data segment rebooted the console), and every syscall pins its caller to the core it entered on. The release job reports ownership loss (-3) because a fresh job thread on the same core does not see the PMCR the prepare job wrote: further evidence of per-thread PMU state. |
+| IRQ overflow delivery (`PMU_IRQ|IRQ_COUNT_ONLY`, single-thread probe, kernel v34) | **Passes.** Preparing and arming the cycle-counter overflow in one job thread that then spins 3 s on core 0 delivered 29 overflows at a 10 Hz period (6687 IRQs seen by the node in that window), each serviced by the raw node (PMOVSR clear + reload) and chained; release 0; console stable. Arming from a *second* job thread fails with ownership loss (-3): the PMU bank programmed by one thread is not what another thread on the same core sees. Together with the timer-PMU readers' first-tick failures this establishes that the firmware keeps PMU state per thread (`SceExcpmgrExceptionContext` also carries PMCR..PMXEVCNTR5). Answered in two steps. (1) Kernel v35 two-phase probe: 29 overflows while the programming kernel thread spins on core 0, 0 while it sleeps. (2) The `intrmgr`/`threadmgr` RE (see `docs/pmu.md`) showed the PMU register set is saved/restored per thread unconditionally, with PMINTENSET left alone; kernel v45 therefore programs every target thread's saved context (PMCR.E via the ForDriver export, PMCCNTR preload via the ForKernel export, PMCNTENSET.C written into the context block at `[thread_obj+0x34]`, mapping verified by a read-back) and arms PMINTENSET.C once per core. Result: **30 and 32 overflows per 3 s at a 10 Hz period from a user thread pinned to core 0 while the kernel thread sleeps**, the cycle counter enabled at all 6073 user-mode IRQ entries. Per-thread PMU sampling of a target process through the raw IRQ node is validated end to end. Caveats found on the way: a kernel thread spinning at high priority on core 0, or a user thread saturating core 0 without yielding, gets the foreground application suspended by the firmware after about 7 s (all its threads show status 256); a target's main thread blocked inside a syscall for more than a few seconds has the same effect. Threads created after activation still need their contexts programmed (not implemented). The second context block at `[thread_obj+0x38]` is DEAD-filled and unused on these threads. |
+| IRQ sampler (`irq_sampling` sample, 10 Hz, core-0 kernel), two earlier runs | **Hard hang, twice.** The second run had the raw node free of threadmgr calls, a count-only mode (no emit) and a report write right after attach: still no report, so the hang is at process start or inside attach, not in the IRQ start. The bring-up's attach on the same kernel build passed. The sample was the only client linking the kernel stub strongly (`--whole-archive`); it now uses the weak import like the bring-up, and with that it attaches without any hang: the strong import of a runtime-loaded syscall library was the launch killer (the automatic CMake integration still links it strongly). After that, `set_sampling_ex(PMU_IRQ|IRQ_REGISTER_ONLY)` never returns even though it arms nothing: kernel-log traces show the `Wakeup` syscall body completing, but neither the client's next printf nor the drain thread's command pickup appear, while the same Submit path works for the bring-up's PMU commands. One such run ended in a hard hang. Original note: No report file was ever written (the sample writes one only after `set_sampling_ex`), the console dropped off the network within seconds (no route to host, not just VitaCompanion) and needed a manual power cycle. The hang is inside attach or `vitaTracySetSampling(PMU_IRQ)`: per-core prepare job, `ksceExcpmgrRegisterHandler` (priority 0, raw node in the RWX section), arm job, or the first PMU/other IRQ entering the raw node. The sample now also writes its report right after attach so the next run can split attach from IRQ start. Review notes (`kernel/sampler_irq.c`): `handle_irq` calls `ksceKernelSetEventFlag`, `ksceKernelGetSystemTimeWide` and the resolved thread-context export from the raw priority-0 node, before Sony's dispatcher runs; kubridge's raw nodes do none of that. |
+
+Side findings: `SCE_SYSMODULE_PERF` still fails to load (`0x805A1000`) and
+`PMUSERENR` is 0, as on 2026-08-21. The RWX segment loaded without incident.
+
+## Console session 2026-09-23 (continuation, kernel library versions 46-57)
+
+Same console and setup. The IRQ backend now runs the design validated by the
+probes: register the raw IRQ node first, then per core one job thread that
+prepares and arms the overflow source, then program every target thread's
+saved PMU context from that job (core 0), then (bring-up markers) count.
+
+| Step | Result |
+|---|---|
+| Real start path, user spinner without yields | 10 overflows/s sustained (82 in 8 s) from a user thread pinned to core 0. |
+| Same, spinner yielding every ~1 ms | Overflows stop after the first second although PMCCNTR keeps running: the firmware saves PMOVSR (write-one-to-clear) around the blocking switch inside the yield's syscall and clears it on restore before any IRQ entry sees it. |
+| Raw priority-0 **SVC** node added (same entry code, services PMOVSR only) | **Sustained ~9 overflows/s with the yielding spinner** (14, 22, 31, 40, 49, 58, 66 at 1 s steps), no ownership errors. Overflows caught at syscall entry are counted as kernel-side (not attributable to a PC). |
+| Overflow seen while the firmware has counters disabled | Previously reported as ownership loss (-3) and stopped the sampler; now ignored until an entry with the cycle counter enabled. |
+| GIC SPI 244 (the line the devkit pamgr registered for the PMU) registered with a -1 handler | Targeted at all four cores: the counter froze (consistent with a level line delivered to cores whose node does not service it). Targeted at core 0 only: registration succeeds but no additional interrupts are delivered; retail never configures 244. Left opt-in (`VITA_TRACY_SAMPLING_IRQ_SPI244`), not used. |
+| Programming contexts from the syscall thread (core 2) vs from the core-0 job | From the syscall thread the spinner's counter sometimes stayed at the preload; from the job on core 0, where the pinned target threads are switched out, it worked every time. The job does it now. |
+| Foreground app suspended ~8 s into the bring-up's count loop | **Still open.** Ruled out one by one: PMU arming, context programming, the spinner thread, screen printing, re-presenting the framebuffer every 100 ms, and the kernel side of `vitaTracyGetStats` (its 8th call completes and returns 0 in the log; the user thread never issues a 9th). The register-only block and the zones loop of the same app do not trigger it. Killing the app afterwards makes the next client crash with `pc=0` (the module's syscall imports no longer bind), so every iteration ends in a reboot. |
+
+Bring-up markers in `ux0:data/` used by `samples/bringup`: `vita_tracy_irq_register_only`,
+`vita_tracy_irq_count_only`, `vita_tracy_irq_skip_program`, `vita_tracy_irq_skip_arm`,
+`vita_tracy_irq_inten_only`, `vita_tracy_irq_spi244`, `vita_tracy_spin_yield`,
+`vita_tracy_no_spinner`, `vita_tracy_quiet`, `vita_tracy_present`. With the IRQ
+backend live, `vitaTracyGetStats` fills the never-sampled core-3 slots and two
+core-2 PMU slots with IRQ-entry diagnostics (user entries, counter-enabled
+entries, PMOVSR sightings, live PMINTENSET/PMCR/PMCNTENSET, cycle deltas, the
+watched thread's saved context); the bring-up prints them.
