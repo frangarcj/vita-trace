@@ -2,6 +2,7 @@
 #include <psp2/io/stat.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/kernel/cpu.h>
 #include <psp2/perf.h>
 
 #include <taihen.h>
@@ -37,6 +38,8 @@ constexpr const char *kKernelPluginModidPath = "ux0:data/vita_tracy_kernel_modid
 char g_report[8192];
 size_t g_report_len = 0;
 
+bool g_quiet = false; /* file only: the debug screen is suspected of stalling the app once it scrolls */
+
 void Report(const char *fmt, ...) {
     char line[256];
     va_list args;
@@ -44,7 +47,7 @@ void Report(const char *fmt, ...) {
     vsnprintf(line, sizeof(line), fmt, args);
     va_end(args);
 
-    psvDebugScreenPrintf("%s\n", line);
+    if (!g_quiet) psvDebugScreenPrintf("%s\n", line);
 
     size_t len = strlen(line);
     if (g_report_len + len + 2 < sizeof(g_report)) {
@@ -65,6 +68,20 @@ void WriteReport() {
     sceIoWrite(fd, g_report, g_report_len);
     sceIoClose(fd);
     psvDebugScreenPrintf("\nreport written to %s\n", kReportPath);
+}
+
+volatile bool g_spin = false;
+volatile bool g_spin_yield = false;
+volatile uint32_t g_spin_acc = 0;
+int SpinThread(SceSize, void *) {
+    /* Yield only if the marker asks for it: a yield is a syscall, and the
+     * syscall switch path is suspected of resetting the saved PMCCNTR. */
+    const bool yield = g_spin_yield;
+    while (g_spin) {
+        for (uint32_t i = 0; i < 300000; ++i) g_spin_acc += i * 3u;
+        if (yield) sceKernelDelayThread(2000); /* ~1 ms work, 2 ms sleep: leave SceShell room on core 0 */
+    }
+    return 0;
 }
 
 void CheckTimebase() {
@@ -307,6 +324,86 @@ void CheckKernelPlugin() {
     }
 
     Report("  attached, ring mapped and acknowledged");
+    WriteReport();
+
+    /* Same call the irq_sampling sample hangs in, issued from this process
+     * whose attach/command path is known to work on the console. */
+    if (KernelPluginMarkerExists("ux0:data/vita_tracy_irq_register_only")) {
+        int irq = vita_tracy_kernel_set_sampling_ex(10,
+            VITA_TRACY_SAMPLING_PMU_IRQ | VITA_TRACY_SAMPLING_IRQ_REGISTER_ONLY);
+        Report("set_sampling(10 Hz, PMU_IRQ|REGISTER_ONLY): %d", irq);
+        WriteReport();
+        if (irq == 0) {
+            sceKernelDelayThread(2000000);
+            VitaTracyStats s{};
+            s.size = sizeof(s);
+            s.abi_version = VITA_TRACY_ABI_VERSION;
+            if (vita_tracy_kernel_get_stats(&s) == 0)
+                Report("  after 2 s: handler %u, c0 irq calls %u, error %d",
+                    s.sample_irq_handler_registered, s.sample_irq_calls[0], s.sample_irq_last_error);
+            int stop = vita_tracy_kernel_set_sampling(0);
+            Report("  stop: %d", stop);
+        }
+        WriteReport();
+    }
+
+    /* Arm the PMU overflow source on core 0 and service it, emitting nothing.
+     * A user thread pinned to core 0 spins for the whole probe so the kernel
+     * probe's sleeping phases measure a busy core, not an idle one. */
+    if (KernelPluginMarkerExists("ux0:data/vita_tracy_irq_count_only")) {
+        g_spin = true;
+        g_spin_yield = KernelPluginMarkerExists("ux0:data/vita_tracy_spin_yield");
+        const bool no_spinner = KernelPluginMarkerExists("ux0:data/vita_tracy_no_spinner");
+        SceUID spinner = no_spinner ? -1 : sceKernelCreateThread("bringup-spin-c0", SpinThread, 0xBF, 0x2000, 0,
+                                               SCE_KERNEL_CPU_MASK_USER_0, nullptr);
+        if (spinner >= 0) sceKernelStartThread(spinner, 0, nullptr);
+        Report("  spinner thread on core 0: 0x%08X (%s)", (unsigned)spinner, g_spin_yield ? "yielding" : "no yields");
+        WriteReport();
+        sceKernelDelayThread(200000);
+        uint32_t knobs = 0;
+        if (KernelPluginMarkerExists("ux0:data/vita_tracy_irq_skip_program")) knobs |= VITA_TRACY_SAMPLING_IRQ_SKIP_PROGRAM;
+        if (KernelPluginMarkerExists("ux0:data/vita_tracy_irq_skip_arm")) knobs |= VITA_TRACY_SAMPLING_IRQ_SKIP_ARM;
+        if (KernelPluginMarkerExists("ux0:data/vita_tracy_irq_spi244")) knobs |= VITA_TRACY_SAMPLING_IRQ_SPI244;
+        if (KernelPluginMarkerExists("ux0:data/vita_tracy_irq_inten_only")) knobs |= VITA_TRACY_SAMPLING_IRQ_INTEN_ONLY;
+        if (KernelPluginMarkerExists("ux0:data/vita_tracy_irq_svc")) knobs |= VITA_TRACY_SAMPLING_IRQ_SVC_NODE;
+        int irq = vita_tracy_kernel_set_sampling_ex(10,
+            VITA_TRACY_SAMPLING_PMU_IRQ | VITA_TRACY_SAMPLING_IRQ_COUNT_ONLY | knobs);
+        Report("set_sampling(10 Hz, PMU_IRQ|COUNT_ONLY|0x%X): %d", (unsigned)knobs, irq);
+        WriteReport();
+        if (irq == 0) {
+            /* The kernel probe runs on its own for ~15 s; stay responsive. */
+            g_quiet = KernelPluginMarkerExists("ux0:data/vita_tracy_quiet");
+            const bool present = KernelPluginMarkerExists("ux0:data/vita_tracy_present");
+            for (int second = 1; second <= 18; ++second) {
+                for (int tenth = 0; tenth < 10; ++tenth) {
+                    sceKernelDelayThread(100000);
+                    if (present) psvDebugScreenPresent();
+                }
+                VitaTracyStats s{};
+                s.size = sizeof(s);
+                s.abi_version = VITA_TRACY_ABI_VERSION;
+                if (vita_tracy_kernel_get_stats(&s) == 0) {
+                    Report("  t=%2ds c0 irq calls %u, overflows %u, kernel %u, foreign %u, ctxerr %u, error %d",
+                        second, s.sample_irq_calls[0], s.sample_irq_overflows[0], s.sample_irq_kernel[0],
+                        s.sample_irq_not_target[0], s.sample_irq_context_errors[0], s.sample_irq_last_error);
+                    Report("       entry: user %u, cnten set %u, ovsr seen %u (user %u), inten %08X pmcr %08X cnten %08X, cyc sum %u",
+                        s.sample_irq_calls[3], s.sample_irq_overflows[3], s.samples_emitted[3], s.samples_dropped[3],
+                        s.sample_irq_kernel[3], s.sample_irq_not_target[3], s.sample_irq_context_errors[3],
+                        s.pmu_records[3]);
+                    Report("       spinner ctx: pmccntr %08X cnten %08X | twin: pmccntr %08X cnten %08X | entries on spinner %u (cnten set %u)",
+                        s.pmu_gaps[3], s.pmu_counter_errors[3], s.pmu_wrong_cpu[3], s.pmu_records[2],
+                        s.pmu_gaps[2], s.pmu_wrong_cpu[2]);
+                }
+                WriteReport();
+            }
+            int stop = vita_tracy_kernel_set_sampling(0);
+            g_quiet = false;
+            Report("  stop: %d", stop);
+        }
+        g_spin = false;
+        if (spinner >= 0) { sceKernelWaitThreadEnd(spinner, nullptr, nullptr); sceKernelDeleteThread(spinner); }
+        WriteReport();
+    }
 
     CheckKernelPmu();
 
@@ -414,16 +511,24 @@ int main() {
     psvDebugScreenInit();
     psvDebugScreenPrintf("vita-tracy bring-up\n\n");
 
-    vita_tracy_init();
-    tracy::SetThreadName("bringup");
-
+    /* Written stage by stage so a hang can be placed from the file alone. */
     Report("vita-tracy bring-up report");
     Report("abi version %u", (unsigned)VITA_TRACY_ABI_VERSION);
+    Report("stage: main entered");
+    WriteReport();
+
+    vita_tracy_init();
+    tracy::SetThreadName("bringup");
+    Report("stage: vita_tracy_init done");
     Report("");
+    WriteReport();
 
     CheckTimebase();
+    WriteReport();
     CheckPmu();
+    WriteReport();
     LoadKernelPlugin();
+    WriteReport();
     CheckKernelPlugin();
 
     WriteReport();

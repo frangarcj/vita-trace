@@ -435,6 +435,14 @@ int psvDebugScreenInit() {
 /*
 * Finalize debug screen
 */
+/* Re-present the current buffer. An app that never calls
+ * sceDisplaySetFrameBuf again after init appears to get suspended by SceShell
+ * after some seconds (observed 2026-09-23). */
+int psvDebugScreenPresent(void) {
+	SceDisplayFrameBuf frame = { sizeof(frame), base, (SCREEN_FB_WIDTH), 0, (SCREEN_WIDTH), (SCREEN_HEIGHT) };
+	return sceDisplaySetFrameBuf(&frame, SCE_DISPLAY_SETBUF_NEXTFRAME);
+}
+
 int psvDebugScreenFinish() {
 	if (!initialized)
 		return -1;

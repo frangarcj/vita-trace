@@ -43,6 +43,7 @@ extern "C" {
 #endif
 int psvDebugScreenInit();
 int psvDebugScreenFinish();
+int psvDebugScreenPresent(void);
 int psvDebugScreenPuts(const char * _text);
 int psvDebugScreenPrintf(const char *format, ...);
 void psvDebugScreenGetColorStateCopy(ColorState *copy);
