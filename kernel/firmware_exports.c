@@ -31,13 +31,13 @@ int vita_tracy_firmware_init(void) {
     /* Known NIDs from the installed VitaSDK 360/363 archives; the exception
      * pair is also used by kubridge. No wildcard library or offset guessing.
      * Publish all-or-nothing, before any IRQ producer can use this table. */
-    if (resolve("SceModulemgr", 0xC445FA63u, 0x97CF7B4Eu,
+    if (resolve("SceKernelModulemgr", 0xC445FA63u, 0x97CF7B4Eu,
                 0x92C9FFC2u, 0xB72C75A4u, &address) < 0) return VITA_TRACY_ERROR_UNSUPPORTED;
     exports.module_list = (int (*)(SceUID, int, int, SceUID *, SceSize *))address;
-    if (resolve("SceModulemgr", 0xC445FA63u, 0xD269F915u,
+    if (resolve("SceKernelModulemgr", 0xC445FA63u, 0xD269F915u,
                 0x92C9FFC2u, 0xDAA90093u, &address) < 0) return VITA_TRACY_ERROR_UNSUPPORTED;
     exports.module_info = (int (*)(SceUID, SceUID, SceKernelModuleInfo *))address;
-    if (resolve("SceThreadmgr", 0xA8CA0EFDu, 0xD8B9AC8Du,
+    if (resolve("SceKernelThreadMgr", 0xA8CA0EFDu, 0xD8B9AC8Du,
                 0x7F8593BAu, 0x6C1F092Fu, &address) < 0) return VITA_TRACY_ERROR_UNSUPPORTED;
     exports.thread_context = (int (*)(SceKernelThreadContextInfo *))address;
     if (resolve("SceExcpmgr", 0x4CA0FDD5u, 0x03499636u,

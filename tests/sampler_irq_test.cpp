@@ -196,10 +196,12 @@ SceUID ksceKernelCreateThread(const char *, SceKernelThreadEntry entry, int, Sce
 
 int ksceKernelStartThread(SceUID id, SceSize size, void *arg) {
     Job &job = fake.jobs.at(id);
-    if (++fake.starts[job.core] == 2 && static_cast<int>(job.core) == fake.fail_arm_core)
+    // One job per core prepares and arms (the firmware keeps PMU state per
+    // thread, so a second job would not see the first one's bank).
+    if (++fake.starts[job.core] == 1 && static_cast<int>(job.core) == fake.fail_arm_core)
         return -91;
     fake.core = static_cast<int>(job.core);
-    if (fake.irq_before_arm && fake.starts[job.core] == 2) {
+    if (fake.irq_before_arm && fake.starts[job.core] == 1) {
         VitaTracyIrqFrame frame{};
         frame.spsr = 0x10;
         frame.irq_lr = 0x81234004;
@@ -289,7 +291,9 @@ TEST_CASE_FIXTURE(Fixture, "IRQ sampler captures target user context without sus
     CHECK(state.stats.sample_irq_calls[1] == 1);
     CHECK(state.stats.sample_irq_overflows[1] == 1);
     CHECK(state.stats.samples_emitted[1] == 1);
-    CHECK(fake.notifications == 1);
+    // The raw node never calls threadmgr: the wake is a pending bit, not a flag set.
+    CHECK(fake.notifications == 0);
+    CHECK((state.irq_pending_wake & VITA_TRACY_WAKE_DATA) != 0);
 }
 
 TEST_CASE_FIXTURE(Fixture, "IRQ sampler ignores unrelated IRQs without touching thread context") {
@@ -342,7 +346,8 @@ TEST_CASE_FIXTURE(Fixture, "IRQ sampler reports PMU ownership loss through a ret
     fake.core = 0;
 
     CHECK(state.stats.sample_irq_last_error == VITA_TRACY_ERROR_STATE);
-    CHECK((fake.notify_events & VITA_TRACY_WAKE_SAMPLE_IRQ(1)) != 0);
+    CHECK(fake.notifications == 0);
+    CHECK((state.irq_pending_wake & VITA_TRACY_WAKE_SAMPLE_IRQ(1)) != 0);
     CHECK(vita_trace_ring_pending(vita_trace_shared_core_ring(memory.data(), 1)) == 0);
 }
 
@@ -414,7 +419,8 @@ TEST_CASE_FIXTURE(Fixture, "IRQ failed preparation join retains the helper until
     fake.fail_join_core = 1;
     CHECK(vita_tracy_sampler_irq_start(&state) == -92);
     CHECK_FALSE(fake.jobs.empty());
-    CHECK_FALSE(vita_tracy_sampler_irq_handler_registered());
+    // The node is registered before any bank is prepared (and stays pinned).
+    CHECK(vita_tracy_sampler_irq_handler_registered());
     CHECK(vita_tracy_sampler_irq_start(&state) == VITA_TRACY_ERROR_BUSY);
     CHECK(vita_tracy_sampler_irq_stop(&state) == -92);
     fake.fail_join_core = -1;
@@ -456,7 +462,7 @@ TEST_CASE_FIXTURE(Fixture, "IRQ sampler honors the build-selected app-core mask"
         const bool selected = (VITA_TRACY_IRQ_CORE_MASK & (1u << cpu)) != 0;
         CHECK(fake.banks[cpu].enable == (selected ? VITA_PMU_CYCLE_BIT : 0u));
         CHECK(fake.banks[cpu].interrupts == (selected ? VITA_PMU_CYCLE_BIT : 0u));
-        CHECK(fake.starts[cpu] == (selected ? 2u : 0u));
+        CHECK(fake.starts[cpu] == (selected ? 1u : 0u));
         VitaTracyIrqFrame context{};
         context.spsr = 0x10u;
         context.irq_lr = 0x81234000u + 4u;

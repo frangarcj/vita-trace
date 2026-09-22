@@ -12,6 +12,21 @@ extern "C" {
  * it as an implicit fallback when an interrupt sampler is unavailable. */
 #define VITA_TRACY_SAMPLING_ALLOW_SUSPEND 1u
 #define VITA_TRACY_SAMPLING_PMU_IRQ 2u
+/* With PMU_IRQ only: register the handler and service overflows, count them
+ * in the stats, but never build or emit a sample. Hardware bring-up aid. */
+#define VITA_TRACY_SAMPLING_IRQ_COUNT_ONLY 4u
+/* With PMU_IRQ only: prepare the banks and register the raw IRQ node, but
+ * never arm a PMU overflow source. Every IRQ on the selected cores then
+ * passes through the node and is counted in sample_irq_calls; this checks
+ * exception-chain integrity on its own. Implies COUNT_ONLY. */
+#define VITA_TRACY_SAMPLING_IRQ_REGISTER_ONLY 8u
+/* Bring-up knobs, only with COUNT_ONLY: skip the per-thread context programming
+ * or skip arming the overflow source. Temporary. */
+#define VITA_TRACY_SAMPLING_IRQ_SKIP_PROGRAM 0x10u
+#define VITA_TRACY_SAMPLING_IRQ_SKIP_ARM 0x20u
+#define VITA_TRACY_SAMPLING_IRQ_SPI244 0x40u      /* register/enable GIC SPI 244 (experimental) */
+#define VITA_TRACY_SAMPLING_IRQ_INTEN_ONLY 0x80u
+#define VITA_TRACY_SAMPLING_IRQ_SVC_NODE 0x100u   /* accepted for compatibility; the SVC node is always installed */  /* arm PMINTENSET.C but keep the job's counter disabled */
 #define VITA_TRACY_MAX_SAMPLE_HZ 1000u
 
 /* Every request struct starts with size + abi_version so the receiver can

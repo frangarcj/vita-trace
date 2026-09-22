@@ -10,18 +10,27 @@
  * This independent IRQ entry preserves the interrupted registers itself and
  * always leaves GIC dispatch/acknowledgement and exception return to Sony.
  * See docs/kubridge-review.md for evidence and the still-unverified IRQ route. */
-.section .vita_tracy_exc_handler,"awx",%progbits
-.balign 8
-.global vita_tracy_irq_handler_node
-.type vita_tracy_irq_handler_node, %object
-vita_tracy_irq_handler_node:
+/* In .text, exactly like kubridge's lvl0 nodes: Excpmgr writes the link word
+ * into the node, and the chain executes the code at node+8. Registering a
+ * node placed in the RWX data segment rebooted the 3.60 console (2026-09-22). */
+.section .text
+.balign 16
+/* One raw priority-0 node per exception kind. The SVC node exists because
+ * the firmware saves and restores PMOVSR (write-one-to-clear) around the
+ * blocking switch inside a syscall: an overflow raised during a user work
+ * window that ends with a syscall rather than an IRQ would be cleared before
+ * any IRQ entry could see it. Servicing at SVC entry closes that gap. */
+.macro VITA_TRACY_RAW_NODE node, entry, handler
+.global \node
+.type \node, %object
+\node:
     .word 0
     .word 0
-.size vita_tracy_irq_handler_node, 8
+.size \node, 8
 
-.global vita_tracy_irq_entry
-.type vita_tracy_irq_entry, %function
-vita_tracy_irq_entry:
+.global \entry
+.type \entry, %function
+\entry:
     sub sp, sp, #VITA_IRQ_FRAME_SIZE
     stmia sp, {r0-r12}
     str lr, [sp, #VITA_IRQ_LINK]
@@ -33,22 +42,18 @@ vita_tracy_irq_entry:
     mrs r0, cpsr
     str r0, [sp, #VITA_IRQ_CPSR]
 
-    /* AAPCS requires 8-byte SP alignment at C calls. Do not assume the raw
-     * firmware entry provides it. r4 is callee-saved and remembers the frame. */
     mov r4, sp
     bic sp, sp, #7
     mov r0, r4
-    bl vita_tracy_irq_handler_c
+    bl \handler
     mov sp, r4
 
-    /* No exception return here. Restore the exact entry state and tail-chain
-     * even when no sample was wanted. A C return to raw LR_irq is not valid. */
     add r0, sp, #VITA_IRQ_USER_SP
     ldmia r0, {sp, lr}^
     nop
     ldr r0, [sp, #VITA_IRQ_SPSR]
     msr spsr_cxsf, r0
-    adr r0, vita_tracy_irq_handler_node
+    adr r0, \node
     ldr r0, [r0]
     add r0, r0, #8
     str r0, [sp, #VITA_IRQ_CHAIN]
@@ -58,6 +63,11 @@ vita_tracy_irq_entry:
     ldmia sp, {r0-r12}
     add sp, sp, #VITA_IRQ_CHAIN
     ldr pc, [sp], #4
-.size vita_tracy_irq_entry, .-vita_tracy_irq_entry
+.size \entry, .-\entry
+.endm
+
+VITA_TRACY_RAW_NODE vita_tracy_irq_handler_node, vita_tracy_irq_entry, vita_tracy_irq_handler_c
+.balign 16
+VITA_TRACY_RAW_NODE vita_tracy_svc_handler_node, vita_tracy_svc_entry, vita_tracy_svc_handler_c
 
 .section .note.GNU-stack,"",%progbits

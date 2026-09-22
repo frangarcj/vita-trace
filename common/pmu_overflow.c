@@ -70,6 +70,11 @@ int vita_pmu_overflow_service(VitaPmuOverflow *overflow, const VitaPmuIo *io) {
     /* This observer sees every IRQ while active. PMOVSR is the cheap source
      * discriminator; only an actual cycle overflow pays the ownership checks. */
     if (!(read_reg(io, VITA_PMU_OVSR) & VITA_PMU_CYCLE_BIT)) return 0;
+    /* The firmware disables every counter on IRQ entry and around thread
+     * switches and re-enables them from the resumed thread's context. A
+     * pending overflow observed while the counters are off is not a loss of
+     * ownership; leave it for an entry where the cycle counter is enabled. */
+    if (!(read_reg(io, VITA_PMU_CNTEN) & VITA_PMU_CYCLE_BIT)) return 0;
     if (!owns_registers(overflow, io)) {
         overflow->acquired = 0;
         return VITA_PMU_ERROR_OWNERSHIP;

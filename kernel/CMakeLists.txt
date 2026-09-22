@@ -6,6 +6,7 @@ add_executable(tracy_kernel
     module_snapshot.c
     pmu_session.c
     pmu_arm.c
+    pmu_thread_ctx.c
     process_events.c
     sampler.c
     sampler_debug_fallback.c
@@ -58,6 +59,7 @@ target_link_libraries(tracy_kernel
     SceThreadmgrForDriver_stub
     SceSystimerForDriver_stub
     ScePowerForDriver_stub
+    SceIntrmgrForDriver_stub
     taihenModuleUtils_stub
 )
 

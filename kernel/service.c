@@ -4,11 +4,30 @@
 #include <psp2kern/kernel/threadmgr.h>
 
 #include "internal.h"
+#include "firmware_exports.h"
 #include "vita_tracy/kernel_abi.h"
 #include "vita_tracy/shared_layout.h"
 #include "vita_tracy/shared_ring.h"
 
 static VitaTracyKernelState g_state;
+
+/* A syscall body that sleeps (thread joins, mappings, printf) can be resumed
+ * on another core; ENTER/EXIT_SYSCALL then restore the wrong core's state
+ * (2026-08-21 bit-30 corruption, 2026-09-22 freezes). Keep the caller on the
+ * core it entered on for the whole syscall. */
+/* Exported by SceThreadmgrForDriver (NID 0x6D0733A8 on 3.60) but absent from the installed header. */
+int ksceKernelChangeThreadCpuAffinityMask(SceUID thid, int cpuAffinityMask);
+
+static int vita_tracy_syscall_pin(void) {
+    SceUID self = ksceKernelGetThreadId();
+    int cpu = ksceKernelCpuId();
+    if (self <= 0 || cpu < 0 || cpu > 3) return -1;
+    return ksceKernelChangeThreadCpuAffinityMask(self, 0x10000 << cpu);
+}
+
+static void vita_tracy_syscall_unpin(int previous) {
+    if (previous > 0) ksceKernelChangeThreadCpuAffinityMask(ksceKernelGetThreadId(), previous);
+}
 
 VitaTracyKernelState *vita_tracy_state(void) {
     return &g_state;
@@ -103,12 +122,14 @@ void vita_tracy_notify_events(VitaTracyKernelState *st, uint32_t events) {
 int vitaTracyWakeup(void) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
+    const int pin_prev = vita_tracy_syscall_pin();
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = VITA_TRACY_ERROR_TARGET;
     if (vita_trace_control_target(&st->control) == (uint32_t)ksceKernelGetProcessId()) {
         vita_tracy_notify(st);
         ret = VITA_TRACY_OK;
     }
+    vita_tracy_syscall_unpin(pin_prev);
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -116,16 +137,27 @@ int vitaTracyWakeup(void) {
 int vitaTracyWaitForData(uint32_t timeout_us) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
+    const int pin_prev = vita_tracy_syscall_pin();
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = VITA_TRACY_ERROR_TARGET;
     if (vita_trace_control_target(&st->control) == (uint32_t)ksceKernelGetProcessId()) {
         unsigned int bits = 0;
+        /* The raw IRQ node cannot set the event flag, so poll its wake bits
+         * at a bounded interval while it is live. */
+        const uint32_t poll_us = 20000u;
         SceUInt timeout = timeout_us;
+        int bounded = vita_tracy_sampler_irq_active();
+        if (bounded && (!timeout_us || timeout_us > poll_us)) timeout = poll_us;
         ret = ksceKernelWaitEventFlag(st->data_event, VITA_TRACY_WAKE_ALL,
             SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
-            &bits, timeout_us ? &timeout : NULL);
-        if (ret >= 0) ret = (int)(bits & VITA_TRACY_WAKE_ALL);
+            &bits, (timeout_us || bounded) ? &timeout : NULL);
+        if (ret == (int)0x80028005 /* SCE_KERNEL_ERROR_WAIT_TIMEOUT */ && bounded) { ret = 0; bits = 0; }
+        if (ret >= 0) {
+            bits |= __atomic_exchange_n(&st->irq_pending_wake, 0u, __ATOMIC_ACQ_REL);
+            ret = (int)(bits & VITA_TRACY_WAKE_ALL);
+        }
     }
+    vita_tracy_syscall_unpin(pin_prev);
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -133,6 +165,7 @@ int vitaTracyWaitForData(uint32_t timeout_us) {
 int vitaTracyResolveThread(uint32_t global_tid) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
+    const int pin_prev = vita_tracy_syscall_pin();
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = vita_tracy_control_begin(st);
     if (ret == 0) {
@@ -151,6 +184,7 @@ int vitaTracyResolveThread(uint32_t global_tid) {
         }
         vita_tracy_control_end(st);
     }
+    vita_tracy_syscall_unpin(pin_prev);
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -205,9 +239,11 @@ static int vitaTracyPmuSampleStop_impl(void);
 int vitaTracyRegister(const VitaTracyRegisterArgs *args) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
+    const int pin_prev = vita_tracy_syscall_pin();
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = vita_tracy_control_begin(st);
     if (ret == 0) { ret = vitaTracyRegister_impl(args); vita_tracy_control_end(st); }
+    vita_tracy_syscall_unpin(pin_prev);
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -215,6 +251,7 @@ int vitaTracyRegister(const VitaTracyRegisterArgs *args) {
 static int vitaTracyRegister_impl(const VitaTracyRegisterArgs *args) {
     VitaTracyKernelState *st = vita_tracy_state();
     SceUID caller_pid = ksceKernelGetProcessId();
+    VITA_TRACY_TRACE("register: pid=0x%08X state=%d\n", (unsigned)caller_pid, (int)st->state);
 
     VitaTracyRegisterArgs local;
     if (!copy_args_from_user(caller_pid, &local, args, sizeof(local))) {
@@ -237,6 +274,14 @@ static int vitaTracyRegister_impl(const VitaTracyRegisterArgs *args) {
     if (st->state != VITA_TRACY_STATE_READY) {
         return VITA_TRACY_ERROR_STATE;
     }
+
+    /* Deferred from module_start (see kernel/main.c). Idempotent and
+     * all-or-nothing, so a failed attempt is retried by the next register. */
+    if (vita_tracy_firmware_init() < 0) {
+        VITA_TRACY_TRACE("register: firmware exports unresolved\n");
+        return VITA_TRACY_ERROR_UNSUPPORTED;
+    }
+    VITA_TRACY_TRACE("register: exports resolved, mapping ring\n");
 
     /* No old producer remains after detach. Do not deliver the previous
      * target's retained failures to a newly attached process. */
@@ -293,9 +338,11 @@ static int vitaTracyRegister_impl(const VitaTracyRegisterArgs *args) {
 int vitaTracyUnregister(uint32_t target_pid) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
+    const int pin_prev = vita_tracy_syscall_pin();
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = vita_tracy_control_begin(st);
     if (ret == 0) { ret = vitaTracyUnregister_impl(target_pid); vita_tracy_control_end(st); }
+    vita_tracy_syscall_unpin(pin_prev);
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -314,9 +361,12 @@ static int vitaTracyUnregister_impl(uint32_t target_pid) {
 int vitaTracySetSampling(const VitaTracySamplingConfig *cfg) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
+    const int pin_prev = vita_tracy_syscall_pin();
+    VITA_TRACY_TRACE("set_sampling: pin -> 0x%08X (now on cpu %d)\n", (unsigned)pin_prev, ksceKernelCpuId());
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = vita_tracy_control_begin(st);
     if (ret == 0) { ret = vitaTracySetSampling_impl(cfg); vita_tracy_control_end(st); }
+    vita_tracy_syscall_unpin(pin_prev);
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -335,10 +385,21 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
         return VITA_TRACY_ERROR_ABI;
     }
     const uint32_t allowed_sampling = VITA_TRACY_SAMPLING_ALLOW_SUSPEND |
-                                      VITA_TRACY_SAMPLING_PMU_IRQ;
+                                      VITA_TRACY_SAMPLING_PMU_IRQ |
+                                      VITA_TRACY_SAMPLING_IRQ_COUNT_ONLY |
+                                      VITA_TRACY_SAMPLING_IRQ_REGISTER_ONLY |
+                                      VITA_TRACY_SAMPLING_IRQ_SKIP_PROGRAM |
+                                      VITA_TRACY_SAMPLING_IRQ_SKIP_ARM |
+                                      VITA_TRACY_SAMPLING_IRQ_SPI244 |
+                                      VITA_TRACY_SAMPLING_IRQ_INTEN_ONLY |
+                                      VITA_TRACY_SAMPLING_IRQ_SVC_NODE;
+    const uint32_t irq_only = VITA_TRACY_SAMPLING_IRQ_COUNT_ONLY |
+                              VITA_TRACY_SAMPLING_IRQ_REGISTER_ONLY;
+    const uint32_t exclusive = VITA_TRACY_SAMPLING_ALLOW_SUSPEND | VITA_TRACY_SAMPLING_PMU_IRQ;
     if (local.frequency_hz > VITA_TRACY_MAX_SAMPLE_HZ ||
         (local.flags & ~allowed_sampling) ||
-        ((local.flags & allowed_sampling) == allowed_sampling))
+        ((local.flags & exclusive) == exclusive) ||
+        ((local.flags & irq_only) && !(local.flags & VITA_TRACY_SAMPLING_PMU_IRQ)))
         return VITA_TRACY_ERROR_ARGS;
 
     if (st->state != VITA_TRACY_STATE_ATTACHED && st->state != VITA_TRACY_STATE_PROFILING &&
@@ -348,6 +409,10 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
 
     /* A failed start can own resources despite leaving the logical state
      * STOPPED. Drain that backend before accepting stop or reconfiguration. */
+    VITA_TRACY_TRACE("set_sampling: hz=%u flags=0x%X state=%d backend=%u cpu=%d tid=0x%08X\n",
+        (unsigned)local.frequency_hz, (unsigned)local.flags, (int)st->state, (unsigned)st->sampler_backend,
+        ksceKernelCpuId(), (unsigned)ksceKernelGetThreadId());
+    ksceKernelDelayThread(200000);
     int stopped = vita_tracy_sampler_stop(st);
     if (stopped < 0) return stopped;
     if (st->state == VITA_TRACY_STATE_PROFILING)
@@ -364,6 +429,7 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
     }
 
     int ret = vita_tracy_sampler_start(st);
+    VITA_TRACY_TRACE("set_sampling: start -> %d\n", ret);
     if (ret != VITA_TRACY_OK) {
         transition(st, VITA_TRACY_EVENT_STOP);
     }
@@ -374,9 +440,11 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
 int vitaTracySetPmu(const VitaTracyPmuConfig *cfg) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
+    const int pin_prev = vita_tracy_syscall_pin();
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = vita_tracy_control_begin(st);
     if (ret == 0) { ret = vitaTracySetPmu_impl(cfg); vita_tracy_control_end(st); }
+    vita_tracy_syscall_unpin(pin_prev);
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -406,9 +474,11 @@ static int vitaTracySetPmu_impl(const VitaTracyPmuConfig *cfg) {
 int vitaTracySnapshotModules(uint32_t target_pid) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
+    const int pin_prev = vita_tracy_syscall_pin();
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = vita_tracy_control_begin(st);
     if (ret == 0) { ret = vitaTracySnapshotModules_impl(target_pid); vita_tracy_control_end(st); }
+    vita_tracy_syscall_unpin(pin_prev);
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -426,14 +496,29 @@ static int vitaTracySnapshotModules_impl(uint32_t target_pid) {
 int vitaTracyGetStats(VitaTracyStats *stats) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
+    const int pin_prev = vita_tracy_syscall_pin();
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = vita_tracy_control_begin(st);
     if (ret == 0) { ret = vitaTracyGetStats_impl(stats); vita_tracy_control_end(st); }
+    vita_tracy_syscall_unpin(pin_prev);
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
 
+static uint32_t g_stats_calls;
+static int vitaTracyGetStats_impl_inner(VitaTracyStats *stats);
 static int vitaTracyGetStats_impl(VitaTracyStats *stats) {
+    int r = vitaTracyGetStats_impl_inner(stats);
+    VITA_TRACY_TRACE("stats: exit %u -> %d\n", g_stats_calls, r);
+    return r;
+}
+static int vitaTracyGetStats_impl_inner(VitaTracyStats *stats) {
+    const uint32_t n = ++g_stats_calls;
+    VITA_TRACY_TRACE("stats: enter %u cpu=%d\n", n, ksceKernelCpuId());
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+    vita_tracy_sampler_irq_fill_diagnostics();
+    VITA_TRACY_TRACE("stats: diagnostics done %u\n", n);
+#endif
     VitaTracyKernelState *st = vita_tracy_state();
     SceUID caller_pid = ksceKernelGetProcessId();
     if (st->target_pid == 0 || caller_pid != st->target_pid) return VITA_TRACY_ERROR_TARGET;
@@ -487,9 +572,11 @@ static int vitaTracyGetStats_impl(VitaTracyStats *stats) {
 int vitaTracyPmuSampleStart(void) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
+    const int pin_prev = vita_tracy_syscall_pin();
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = vita_tracy_control_begin(st);
     if (ret == 0) { ret = vitaTracyPmuSampleStart_impl(); vita_tracy_control_end(st); }
+    vita_tracy_syscall_unpin(pin_prev);
     EXIT_SYSCALL(syscall_state);
     return ret;
 }
@@ -506,9 +593,11 @@ static int vitaTracyPmuSampleStart_impl(void) {
 int vitaTracyPmuSampleStop(void) {
     uint32_t syscall_state;
     ENTER_SYSCALL(syscall_state);
+    const int pin_prev = vita_tracy_syscall_pin();
     VitaTracyKernelState *st = vita_tracy_state();
     int ret = vita_tracy_control_begin(st);
     if (ret == 0) { ret = vitaTracyPmuSampleStop_impl(); vita_tracy_control_end(st); }
+    vita_tracy_syscall_unpin(pin_prev);
     EXIT_SYSCALL(syscall_state);
     return ret;
 }

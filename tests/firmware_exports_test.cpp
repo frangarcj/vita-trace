@@ -11,9 +11,9 @@ extern "C" {
 namespace {
 struct Spec { const char *module; uint32_t library[2], function[2]; };
 const Spec specs[] = {
-    {"SceModulemgr", {0xC445FA63, 0x92C9FFC2}, {0x97CF7B4E, 0xB72C75A4}},
-    {"SceModulemgr", {0xC445FA63, 0x92C9FFC2}, {0xD269F915, 0xDAA90093}},
-    {"SceThreadmgr", {0xA8CA0EFD, 0x7F8593BA}, {0xD8B9AC8D, 0x6C1F092F}},
+    {"SceKernelModulemgr", {0xC445FA63, 0x92C9FFC2}, {0x97CF7B4E, 0xB72C75A4}},
+    {"SceKernelModulemgr", {0xC445FA63, 0x92C9FFC2}, {0xD269F915, 0xDAA90093}},
+    {"SceKernelThreadMgr", {0xA8CA0EFD, 0x7F8593BA}, {0xD8B9AC8D, 0x6C1F092F}},
     {"SceExcpmgr", {0x4CA0FDD5, 0x1496A5B5}, {0x03499636, 0x00063675}},
 };
 struct Fake {

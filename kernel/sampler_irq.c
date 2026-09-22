@@ -1,4 +1,7 @@
 #include <psp2kern/kernel/cpu.h>
+#if defined(__vita__)
+#include <psp2kern/kernel/intrmgr.h>
+#endif
 #include <psp2kern/kernel/excpmgr.h>
 #include <psp2kern/kernel/sysclib.h>
 #include <psp2kern/kernel/threadmgr.h>
@@ -8,6 +11,7 @@
 #include "internal.h"
 #include "irq_frame.h"
 #include "firmware_exports.h"
+#include "pmu_thread_ctx.h"
 #include "vita_tracy/kernel_abi.h"
 #include "vita_tracy/pmu_overflow.h"
 
@@ -18,12 +22,23 @@
 #error "IRQ sampling must select at least one app core (bits 0..2)"
 #endif
 #define VITA_TRACY_IRQ_HANDLER_PRIORITY 0
+/* Thread context only. The 200 ms pause lets catlog flush the line before the
+ * next step, so a freeze in that step cannot swallow it. */
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+#  define IRQ_TRACE(...) do { VITA_TRACY_TRACE(__VA_ARGS__); ksceKernelDelayThread(20000); } while (0)
+#  define IRQ_SLEEP_US(us) ksceKernelDelayThread(us)
+#  define IRQ_STATUS(pid, tag) vita_tracy_pmu_ctx_status((pid), (tag))
+#else
+#  define IRQ_TRACE(...) ((void)0)
+#  define IRQ_SLEEP_US(us) ((void)0)
+#  define IRQ_STATUS(pid, tag) ((void)0)
+#endif
 #define IRQ_ADMISSION_OPEN 0x80000000u
 #define IRQ_ADMISSION_ACTIVE 1u
 
 const VitaPmuIo *vita_tracy_pmu_io(void);
 
-enum { IRQ_PREPARE = 1, IRQ_ARM, IRQ_RELEASE };
+enum { IRQ_PREPARE = 1, IRQ_ARM, IRQ_RELEASE, IRQ_PREPARE_ARM };
 
 typedef struct IrqCpu {
     VitaPmuOverflow overflow;
@@ -41,20 +56,79 @@ typedef struct IrqSampler {
     VitaTracyKernelState *state;
     uint32_t initialized;
     uint32_t registered;
+    uint32_t svc_registered;
     uint32_t service_enabled;
     uint32_t emit_enabled;
     uint32_t core_mask;
     uint32_t period_cycles;
+    uint32_t contexts_programmed;
 } IrqSampler;
 
 static IrqSampler g_irq;
 
+/* The Cortex-A9 PMU overflow line reaches the GIC as SPI 244 (the devkit
+ * pamgr registered it with target mask 0xF). Retail registers nothing for
+ * it, and intrmgr returns from an unhandled ID without EOI, which leaves the
+ * core deaf to lower-priority interrupts until reboot. A no-op handler that
+ * returns -1 keeps the line armed and lets intrmgr acknowledge it. Sampling
+ * itself still happens in the raw priority-0 node, which runs first. */
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+#define VITA_TRACY_PMU_INTR_CODE 244
+#define VITA_TRACY_PMU_INTR_PRIORITY 0xD0
+static uint32_t g_pmu_intr_registered;
+
+static __attribute__((unused)) int pmu_intr_handler(int unk, void *user_ctx) {
+    (void)unk;
+    (void)user_ctx;
+    return -1; /* handled; keep enabled */
+}
+
+static __attribute__((unused)) int register_pmu_intr(void) {
+    if (g_pmu_intr_registered) return 0;
+    /* Target only the sampled cores: a delivery on a core whose node does
+     * not service PMOVSR turns a level line into an interrupt storm. */
+    int ret = ksceKernelRegisterIntrHandler(VITA_TRACY_PMU_INTR_CODE, "VitaTracyPmu", 0,
+        pmu_intr_handler, NULL, VITA_TRACY_PMU_INTR_PRIORITY, (int)VITA_TRACY_IRQ_CORE_MASK, NULL);
+    IRQ_TRACE("irq: register intr %d -> 0x%08X\n", VITA_TRACY_PMU_INTR_CODE, (unsigned)ret);
+    if (ret < 0) return ret;
+    g_pmu_intr_registered = 1;
+    ret = ksceKernelEnableIntr(VITA_TRACY_PMU_INTR_CODE);
+    IRQ_TRACE("irq: enable intr %d -> 0x%08X\n", VITA_TRACY_PMU_INTR_CODE, (unsigned)ret);
+    return ret;
+}
+
+static __attribute__((unused)) void release_pmu_intr(void) {
+    if (!g_pmu_intr_registered) return;
+    int d = ksceKernelDisableIntr(VITA_TRACY_PMU_INTR_CODE);
+    int r = ksceKernelReleaseIntrHandler(VITA_TRACY_PMU_INTR_CODE);
+    IRQ_TRACE("irq: disable/release intr %d -> 0x%08X / 0x%08X\n", VITA_TRACY_PMU_INTR_CODE, (unsigned)d, (unsigned)r);
+    if (r >= 0) g_pmu_intr_registered = 0;
+}
+#endif
+
+/* Bring-up diagnostics gathered at IRQ entry on core 0, before Sony's
+ * dispatcher touches the PMU: was the cycle counter enabled for the
+ * interrupted user thread, and how far did it advance since the last IRQ? */
+typedef struct IrqPmuProbe {
+    uint32_t entries, user_entries, enabled_at_entry, pmcr_e_at_entry;
+    uint32_t last_pmccntr, have_last, max_delta, sum_delta_lo;
+    uint32_t last_pmcr, last_cnten, last_inten;
+    uint32_t mode_usr, mode_svc, mode_sys, mode_irq, mode_other, last_spsr, last_cpsr;
+    uint32_t ctx_ok, ctx_target_pid, ctx_watch_tid, ctx_watch_enabled;
+    uint32_t ovsr_seen, ovsr_user;
+    SceUID watch_tid;
+} IrqPmuProbe;
+static IrqPmuProbe g_probe;
+
 /* The assembly entry builds our private frame and always tail-chains to the
  * next raw handler. It does not receive a Sony C exception-context pointer. */
 extern uint32_t vita_tracy_irq_handler_node[];
+extern uint32_t vita_tracy_svc_handler_node[];
 void vita_tracy_irq_handler_c(const VitaTracyIrqFrame *context);
+void vita_tracy_svc_handler_c(const VitaTracyIrqFrame *context);
 #ifndef __vita__
 uint32_t vita_tracy_irq_handler_node[2];
+uint32_t vita_tracy_svc_handler_node[2];
 #endif
 
 static void initialize(void) {
@@ -91,6 +165,7 @@ static int core_job(SceSize size, void *arg) {
     const uint32_t index = *(const uint32_t *)arg;
     if (index >= VITA_TRACE_CORE_COUNT) return VITA_TRACY_ERROR_ARGS;
     IrqCpu *cpu = &g_irq.cpus[index];
+    IRQ_TRACE("irq: job thread running on core %d for core %u\n", ksceKernelCpuId(), index);
     if ((uint32_t)ksceKernelCpuId() != index) {
         cpu->result = VITA_TRACY_ERROR_CPU;
         return 0;
@@ -100,14 +175,40 @@ static int core_job(SceSize size, void *arg) {
     if (cpu->operation == IRQ_PREPARE) {
         cpu->result = map_pmu_error(vita_pmu_overflow_prepare(
             &cpu->overflow, vita_tracy_pmu_io(), g_irq.period_cycles));
+    } else if (cpu->operation == IRQ_PREPARE_ARM) {
+        cpu->result = map_pmu_error(vita_pmu_overflow_prepare(
+            &cpu->overflow, vita_tracy_pmu_io(), g_irq.period_cycles));
+        if (cpu->result == 0)
+            cpu->result = map_pmu_error(vita_pmu_overflow_arm(&cpu->overflow, vita_tracy_pmu_io()));
+        if (cpu->result == 0 && g_irq.state && (g_irq.state->sampling_flags & VITA_TRACY_SAMPLING_IRQ_INTEN_ONLY))
+            vita_tracy_pmu_io()->write(vita_tracy_pmu_io()->context, VITA_PMU_CNTCLR, 0x80000000u);
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+        if (cpu->result == 0 && g_irq.state && index == 0 &&
+            !(g_irq.state->sampling_flags & VITA_TRACY_SAMPLING_IRQ_SKIP_PROGRAM)) {
+            /* Program the target threads' saved contexts from this core: the
+             * ones pinned here are switched out while this job runs. */
+            ksceKernelCpuResumeIntr(intr);
+            int programmed = vita_tracy_pmu_ctx_program(g_irq.state->target_pid, cpu->overflow.preload);
+            IRQ_TRACE("irq: programmed %d target threads from core %u\n", programmed, index);
+            g_irq.contexts_programmed = programmed >= 0;
+            intr = ksceKernelCpuSuspendIntr();
+        }
+#endif
     } else if (cpu->operation == IRQ_ARM) {
         cpu->result = map_pmu_error(vita_pmu_overflow_arm(
             &cpu->overflow, vita_tracy_pmu_io()));
     } else {
         cpu->result = map_pmu_error(vita_pmu_overflow_release(
             &cpu->overflow, vita_tracy_pmu_io()));
+        /* PMINTENSET is per-core, not per-thread: clear it here even when this
+         * fresh thread's own bank made the ownership check fail. */
+        vita_tracy_pmu_io()->write(vita_tracy_pmu_io()->context, VITA_PMU_INTCLR, 0x80000000u);
+        cpu->overflow.acquired = 0;
+        cpu->overflow.armed = 0;
+        if (cpu->result == VITA_TRACY_ERROR_STATE) cpu->result = 0;
     }
     ksceKernelCpuResumeIntr(intr);
+    IRQ_TRACE("irq: job op=%d on core %u -> %d\n", cpu->operation, index, cpu->result);
     return 0;
 }
 
@@ -130,6 +231,7 @@ static int run_job(IrqCpu *cpu, int operation) {
 
     cpu->operation = operation;
     cpu->result = VITA_TRACY_ERROR_STATE;
+    IRQ_TRACE("irq: job op=%d core=%u create\n", operation, (unsigned)cpu->cpu);
     SceUID thread = ksceKernelCreateThread("VitaTracyIrqSetup", core_job, 0x10000100,
         0x2000, 0, (int)(0x10000u << cpu->cpu), NULL);
     if (thread < 0) return thread;
@@ -143,6 +245,8 @@ static int run_job(IrqCpu *cpu, int operation) {
     }
     cpu->job_started = 1;
     ret = finish_job(cpu);
+    IRQ_TRACE("irq: job op=%d core=%u done wait=%d result=%d\n", operation,
+        (unsigned)cpu->cpu, ret, cpu->result);
     return ret < 0 ? ret : cpu->result;
 }
 
@@ -151,8 +255,12 @@ static int register_handler(VitaTracyKernelState *st) {
         __atomic_store_n(&st->stats.sample_irq_handler_registered, 1u, __ATOMIC_RELEASE);
         return vita_tracy_irq_handler_node[0] ? 0 : VITA_TRACY_ERROR_STATE;
     }
+    IRQ_TRACE("irq: registering node %p (words %08X %08X)\n",
+        (void *)vita_tracy_irq_handler_node, (unsigned)vita_tracy_irq_handler_node[0],
+        (unsigned)vita_tracy_irq_handler_node[1]);
     int ret = vita_tracy_fw_register_handler(SCE_EXCP_IRQ, VITA_TRACY_IRQ_HANDLER_PRIORITY,
                                          vita_tracy_irq_handler_node);
+    IRQ_TRACE("irq: register -> %d, next=%08X\n", ret, (unsigned)vita_tracy_irq_handler_node[0]);
     if (ret < 0) return ret;
     __atomic_store_n(&g_irq.registered, 1u, __ATOMIC_RELEASE);
     __atomic_store_n(&st->stats.sample_irq_handler_registered, 1u, __ATOMIC_RELEASE);
@@ -162,8 +270,73 @@ static int register_handler(VitaTracyKernelState *st) {
     return 0;
 }
 
+static __attribute__((unused)) void probe_at_entry(const VitaTracyIrqFrame *context) {
+    const VitaPmuIo *io = vita_tracy_pmu_io();
+    g_probe.entries++;
+    const uint32_t cnten = io->read(io->context, VITA_PMU_CNTEN);
+    const uint32_t pmcr = io->read(io->context, VITA_PMU_PMCR);
+    g_probe.last_cnten = cnten;
+    g_probe.last_pmcr = pmcr;
+    g_probe.last_inten = io->read(io->context, VITA_PMU_INTEN);
+    if (io->read(io->context, VITA_PMU_OVSR) & 0x80000000u) {
+        g_probe.ovsr_seen++;
+        if (context && (context->spsr & 0x1Fu) == 0x10u) g_probe.ovsr_user++;
+    }
+    if (g_irq.state) {
+        /* Bring-up only: core 3 is never sampled, its slots carry diagnostics. */
+        g_irq.state->stats.sample_irq_calls[3] = g_probe.user_entries;
+        g_irq.state->stats.sample_irq_overflows[3] = g_probe.enabled_at_entry;
+        g_irq.state->stats.sample_irq_kernel[3] = g_probe.last_inten;
+        g_irq.state->stats.sample_irq_not_target[3] = g_probe.last_pmcr;
+        g_irq.state->stats.sample_irq_context_errors[3] = g_probe.last_cnten;
+        g_irq.state->stats.samples_emitted[3] = g_probe.ovsr_seen;
+        g_irq.state->stats.samples_dropped[3] = g_probe.ovsr_user;
+        g_irq.state->stats.pmu_records[3] = g_probe.sum_delta_lo;
+        g_irq.state->stats.pmu_dropped[3] = g_probe.max_delta;
+        g_irq.state->stats.pmu_gaps[2] = g_probe.ctx_watch_tid;
+        g_irq.state->stats.pmu_wrong_cpu[2] = g_probe.ctx_watch_enabled;
+    }
+    if (context) {
+        const uint32_t mode = context->spsr & 0x1Fu;
+        g_probe.last_spsr = context->spsr;
+        g_probe.last_cpsr = context->entry_cpsr;
+        if (mode == 0x10u) g_probe.mode_usr++;
+        else if (mode == 0x13u) g_probe.mode_svc++;
+        else if (mode == 0x1Fu) g_probe.mode_sys++;
+        else if (mode == 0x12u) g_probe.mode_irq++;
+        else g_probe.mode_other++;
+    }
+    {
+        SceKernelThreadContextInfo info;
+        if (vita_tracy_fw_thread_context(&info) >= 0) {
+            g_probe.ctx_ok++;
+            if (g_irq.state && info.process_id == g_irq.state->target_pid) g_probe.ctx_target_pid++;
+            if (g_probe.watch_tid && info.thread_id == g_probe.watch_tid) {
+                g_probe.ctx_watch_tid++;
+                if (cnten & 0x80000000u) g_probe.ctx_watch_enabled++;
+            }
+        }
+    }
+    if (context && (context->spsr & 0x1Fu) == 0x10u) {
+        g_probe.user_entries++;
+        if (cnten & 0x80000000u) g_probe.enabled_at_entry++;
+        if (pmcr & 1u) g_probe.pmcr_e_at_entry++;
+        const uint32_t now = io->read(io->context, VITA_PMU_CYCLES);
+        if (g_probe.have_last) {
+            const uint32_t d = now - g_probe.last_pmccntr;
+            if (d > g_probe.max_delta) g_probe.max_delta = d;
+            g_probe.sum_delta_lo += d;
+        }
+        g_probe.last_pmccntr = now;
+        g_probe.have_last = 1;
+    }
+}
+
 static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
     if (!__atomic_load_n(&g_irq.service_enabled, __ATOMIC_ACQUIRE)) return;
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+    if (cpu_id == 0) probe_at_entry(context); /* bring-up diagnostics only */
+#endif
 
     VitaTracyKernelState *st = g_irq.state;
     if (!st) return;
@@ -177,7 +350,8 @@ static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
     if (ret < 0) {
         cpu->failed = 1;
         record_error(st, map_pmu_error(ret));
-        vita_tracy_notify_events(st, VITA_TRACY_WAKE_SAMPLE_IRQ(cpu_id));
+        /* Raw priority-0 node: no threadmgr calls here (2026-09-22 hang). */
+        __atomic_fetch_or(&st->irq_pending_wake, VITA_TRACY_WAKE_SAMPLE_IRQ(cpu_id), __ATOMIC_RELEASE);
         return;
     }
     if (!ret) return;
@@ -232,7 +406,28 @@ static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
     sample.flags = VITA_TRACE_SAMPLE_PMU_IRQ | VITA_TRACE_SAMPLE_GLOBAL_TID;
     if (context->spsr & (1u << 5)) sample.flags |= VITA_TRACE_SAMPLE_THUMB;
     vita_tracy_emit_sample(st, cpu_id, &sample);
-    vita_tracy_notify(st);
+    __atomic_fetch_or(&st->irq_pending_wake, VITA_TRACY_WAKE_DATA, __ATOMIC_RELEASE);
+}
+
+void vita_tracy_svc_handler_c(const VitaTracyIrqFrame *context) {
+    (void)context;
+    const uint32_t cpu_id = (uint32_t)ksceKernelCpuId();
+    if (cpu_id >= VITA_TRACE_CORE_COUNT) return;
+    if (!__atomic_load_n(&g_irq.service_enabled, __ATOMIC_ACQUIRE)) return;
+    IrqCpu *cpu = &g_irq.cpus[cpu_id];
+    uint32_t expected = IRQ_ADMISSION_OPEN;
+    if (!__atomic_compare_exchange_n(&cpu->admission, &expected,
+            IRQ_ADMISSION_OPEN | IRQ_ADMISSION_ACTIVE, 0,
+            __ATOMIC_ACQUIRE, __ATOMIC_RELAXED)) return;
+    VitaTracyKernelState *st = g_irq.state;
+    if (st && cpu->overflow.acquired && cpu->overflow.armed && !cpu->failed) {
+        int ret = vita_pmu_overflow_service(&cpu->overflow, vita_tracy_pmu_io());
+        if (ret > 0) {
+            __atomic_fetch_add(&st->stats.sample_irq_overflows[cpu_id], 1u, __ATOMIC_RELAXED);
+            __atomic_fetch_add(&st->stats.sample_irq_kernel[cpu_id], 1u, __ATOMIC_RELAXED); /* seen at a syscall: not attributable */
+        }
+    }
+    __atomic_fetch_and(&cpu->admission, ~IRQ_ADMISSION_ACTIVE, __ATOMIC_RELEASE);
 }
 
 void vita_tracy_irq_handler_c(const VitaTracyIrqFrame *context) {
@@ -255,7 +450,10 @@ int vita_tracy_sampler_irq_start(VitaTracyKernelState *st) {
     if (__atomic_load_n(&g_irq.service_enabled, __ATOMIC_ACQUIRE) || has_resources())
         return VITA_TRACY_ERROR_BUSY;
 
+    IRQ_TRACE("irq: start hz=%u flags=0x%X mask=%u, reading ARM clock\n", (unsigned)st->sampling_hz,
+        (unsigned)st->sampling_flags, (unsigned)VITA_TRACY_IRQ_CORE_MASK);
     const int arm_mhz = kscePowerGetArmClockFrequency();
+    IRQ_TRACE("irq: arm_mhz=%d\n", arm_mhz);
     if (arm_mhz <= 0) return VITA_TRACY_ERROR_UNSUPPORTED;
     const uint64_t period = ((uint64_t)(uint32_t)arm_mhz * 1000000ull) / st->sampling_hz;
     if (!period || period > UINT32_MAX) return VITA_TRACY_ERROR_ARGS;
@@ -271,13 +469,24 @@ int vita_tracy_sampler_irq_start(VitaTracyKernelState *st) {
     for (uint32_t i = 0; i < VITA_TRACE_CORE_COUNT; ++i) {
         if (!(g_irq.core_mask & (1u << i))) continue;
         g_irq.cpus[i].failed = 0;
-        ret = run_job(&g_irq.cpus[i], IRQ_PREPARE);
-        if (ret < 0) goto fail_before_handler;
     }
 
+    /* Register first: a bank prepared in a short-lived job thread is that
+     * thread's context, not the core's, so preparing before the node exists
+     * proves nothing and would only corrupt the restore value. */
     ret = register_handler(st);
     if (ret < 0) goto fail_before_handler;
 
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+    /* Not modelled by the host tests: only the IRQ node is registered there. */
+    if (!g_irq.svc_registered) {
+        IRQ_TRACE("irq: registering svc node %p\n", (void *)vita_tracy_svc_handler_node);
+        int sret = vita_tracy_fw_register_handler(SCE_EXCP_SVC, VITA_TRACY_IRQ_HANDLER_PRIORITY,
+                                                  vita_tracy_svc_handler_node);
+        IRQ_TRACE("irq: svc register -> %d, next=%08X\n", sret, (unsigned)vita_tracy_svc_handler_node[0]);
+        if (sret >= 0) g_irq.svc_registered = 1;
+    }
+#endif
     /* From this point the plugin is intentionally non-unloadable until reboot:
      * the public Excpmgr API has no unregister operation. */
     __atomic_store_n(&g_irq.service_enabled, 1u, __ATOMIC_RELEASE);
@@ -286,12 +495,29 @@ int vita_tracy_sampler_irq_start(VitaTracyKernelState *st) {
         if (g_irq.core_mask & (1u << i))
             __atomic_store_n(&g_irq.cpus[i].admission, IRQ_ADMISSION_OPEN, __ATOMIC_RELEASE);
     }
-    for (uint32_t i = 0; i < VITA_TRACE_CORE_COUNT; ++i) {
-        if (!(g_irq.core_mask & (1u << i))) continue;
-        ret = run_job(&g_irq.cpus[i], IRQ_ARM);
+    if (st->sampling_flags & VITA_TRACY_SAMPLING_IRQ_REGISTER_ONLY) return VITA_TRACY_OK;
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+    if ((st->sampling_flags & VITA_TRACY_SAMPLING_IRQ_SPI244) &&
+        !(st->sampling_flags & VITA_TRACY_SAMPLING_IRQ_SKIP_ARM)) {
+        ret = register_pmu_intr();
         if (ret < 0) goto fail_after_handler;
     }
-    __atomic_store_n(&g_irq.emit_enabled, 1u, __ATOMIC_RELEASE);
+#endif
+    /* Arming in a fresh job thread would fail the ownership check (the bank
+     * it sees is that thread's own context), so prepare+arm run together. */
+    for (uint32_t i = 0; i < VITA_TRACE_CORE_COUNT; ++i) {
+        if (!(g_irq.core_mask & (1u << i))) continue;
+        g_irq.cpus[i].overflow.acquired = 0;
+        g_irq.cpus[i].overflow.armed = 0;
+        if (st->sampling_flags & VITA_TRACY_SAMPLING_IRQ_SKIP_ARM) continue;
+        ret = run_job(&g_irq.cpus[i], IRQ_PREPARE_ARM);
+        if (ret < 0) goto fail_after_handler;
+    }
+    memset(&g_probe, 0, sizeof(g_probe));
+    /* The firmware keeps PMU state per thread: the interrupt source only
+     * fires for threads whose saved context enables the cycle counter. */
+    if (!(st->sampling_flags & VITA_TRACY_SAMPLING_IRQ_COUNT_ONLY))
+        __atomic_store_n(&g_irq.emit_enabled, 1u, __ATOMIC_RELEASE);
     return VITA_TRACY_OK;
 
 fail_after_handler:
@@ -322,6 +548,14 @@ int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st) {
     if (g_irq.state && st != g_irq.state) return VITA_TRACY_ERROR_TARGET;
 
     __atomic_store_n(&g_irq.emit_enabled, 0u, __ATOMIC_RELEASE);
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+    release_pmu_intr();
+    if (g_irq.contexts_programmed && st) {
+        int rel = vita_tracy_pmu_ctx_release(st->target_pid);
+        IRQ_TRACE("irq: target contexts released -> %d\n", rel);
+        g_irq.contexts_programmed = 0;
+    }
+#endif
     for (uint32_t i = 0; i < VITA_TRACE_CORE_COUNT; ++i) {
         if (__atomic_load_n(&g_irq.cpus[i].admission, __ATOMIC_ACQUIRE) & IRQ_ADMISSION_ACTIVE) {
             record_error(st, VITA_TRACY_ERROR_BUSY);
@@ -362,6 +596,11 @@ int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st) {
     return first_error;
 }
 
+int vita_tracy_sampler_irq_active(void) {
+    initialize();
+    return __atomic_load_n(&g_irq.service_enabled, __ATOMIC_ACQUIRE) != 0;
+}
+
 int vita_tracy_sampler_irq_handler_registered(void) {
     initialize();
     return __atomic_load_n(&g_irq.registered, __ATOMIC_ACQUIRE) != 0;
@@ -371,5 +610,22 @@ int vita_tracy_sampler_irq_handler_registered(void) {
 void vita_tracy_sampler_irq_test_reset(void) {
     memset(&g_irq, 0, sizeof(g_irq));
     initialize();
+}
+#endif
+
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+/* Bring-up: the watched thread's saved PMCCNTR/PMCNTENSET in both blocks. */
+void vita_tracy_sampler_irq_fill_diagnostics(void) {
+    if (!g_irq.state) return;
+    if (!g_probe.watch_tid)
+        g_probe.watch_tid = vita_tracy_pmu_ctx_find_thread(g_irq.state->target_pid, "bringup-spin-c0");
+    if (!g_probe.watch_tid) return;
+    uint32_t p = 0, t = 0, pc = 0, tc = 0;
+    if (vita_tracy_pmu_ctx_peek(g_probe.watch_tid, &p, &t, &pc, &tc) == 0) {
+        g_irq.state->stats.pmu_gaps[3] = p;
+        g_irq.state->stats.pmu_wrong_cpu[3] = t;
+        g_irq.state->stats.pmu_counter_errors[3] = pc;
+        g_irq.state->stats.pmu_records[2] = tc; /* core 2 unused with mask 1 */
+    }
 }
 #endif

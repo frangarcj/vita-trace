@@ -8,6 +8,15 @@
 #include "tick_source.h"
 #include "vita_tracy/control_gate.h"
 
+/* Bring-up tracing: kernel printf reaches the catlog TCP sink with a timestamp.
+ * Thread context only; never from a timer callback or the raw IRQ node. */
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+#  include <psp2kern/kernel/debug.h>
+#  define VITA_TRACY_TRACE(...) ksceDebugPrintf("vita-tracy: " __VA_ARGS__)
+#else
+#  define VITA_TRACY_TRACE(...) ((void)0)
+#endif
+
 typedef struct VitaTracyKernelState {
     VitaTracyState state;
     VitaTraceControlGate control;
@@ -29,6 +38,10 @@ typedef struct VitaTracyKernelState {
     uint32_t sampling_flags;
     VitaTracyTickSource sample_clock;
     SceUID data_event;
+    /* Wake bits raised from the raw IRQ node, which must not touch threadmgr.
+     * vitaTracyWaitForData drains them; it bounds its wait while that node
+     * is live so no event is delayed for more than one poll interval. */
+    uint32_t irq_pending_wake;
     uint32_t control_writer_lock;
     uint32_t sampler_backend;
 
@@ -79,6 +92,8 @@ int vita_tracy_sampler_diagnostic_stop(VitaTracyKernelState *st);
 int vita_tracy_sampler_irq_start(VitaTracyKernelState *st);
 int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st);
 int vita_tracy_sampler_irq_handler_registered(void);
+int vita_tracy_sampler_irq_active(void);
+void vita_tracy_sampler_irq_fill_diagnostics(void);
 
 int vita_tracy_pmu_configure(VitaTracyKernelState *st, const VitaTracyPmuConfig *cfg);
 
