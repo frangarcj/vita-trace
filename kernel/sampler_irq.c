@@ -430,6 +430,9 @@ static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
         adopt_thread(cpu_id, cpu, st, context);
         return;
     }
+    if (ret == VITA_PMU_OVERFLOW_MISSED_RECENT || ret == VITA_PMU_OVERFLOW_MISSED_STALE)
+        __atomic_fetch_add(&st->stats.sample_irq_missed[cpu_id], 1u, __ATOMIC_RELAXED);
+    if (ret == VITA_PMU_OVERFLOW_MISSED_STALE) return;
 
     __atomic_fetch_add(&st->stats.sample_irq_overflows[cpu_id], 1u, __ATOMIC_RELAXED);
     if (!__atomic_load_n(&g_irq.emit_enabled, __ATOMIC_ACQUIRE) ||
@@ -497,7 +500,9 @@ void vita_tracy_svc_handler_c(const VitaTracyIrqFrame *context) {
     VitaTracyKernelState *st = g_irq.state;
     if (st && cpu->overflow.acquired && cpu->overflow.armed && !cpu->failed) {
         int ret = vita_pmu_overflow_service(&cpu->overflow, vita_tracy_pmu_io());
-        if (ret > 0) {
+        if (ret == VITA_PMU_OVERFLOW_MISSED_RECENT || ret == VITA_PMU_OVERFLOW_MISSED_STALE)
+            __atomic_fetch_add(&st->stats.sample_irq_missed[cpu_id], 1u, __ATOMIC_RELAXED);
+        if (ret > 0 && ret != VITA_PMU_OVERFLOW_MISSED_STALE) {
             __atomic_fetch_add(&st->stats.sample_irq_overflows[cpu_id], 1u, __ATOMIC_RELAXED);
             __atomic_fetch_add(&st->stats.sample_irq_kernel[cpu_id], 1u, __ATOMIC_RELAXED); /* seen at a syscall: not attributable */
         }

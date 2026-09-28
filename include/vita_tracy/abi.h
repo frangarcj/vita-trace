@@ -105,6 +105,9 @@ typedef struct VitaTracyStats {
     /* Target threads whose PMU bank the IRQ node enabled on first sight,
      * e.g. threads created after sampling started. */
     uint32_t sample_irq_adopted[4];
+    /* Overflows found only after PMOVSR had been cleared under us; the
+     * counter was reloaded (and sampled when the wrap was recent). */
+    uint32_t sample_irq_missed[4];
 } VitaTracyStats;
 
 #ifdef __cplusplus

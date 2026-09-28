@@ -4,14 +4,14 @@ VitaTracyKernel:
   imagemodule: false
   version:
     major: 1
-    minor: 59
+    minor: 62
   main:
     start: module_start
     stop: module_stop
   libraries:
     VitaTracyKernel:
       syscall: true
-      version: 59
+      version: 62
       functions:
         - vitaTracyRegister
         - vitaTracyUnregister

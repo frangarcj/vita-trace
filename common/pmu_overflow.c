@@ -69,7 +69,20 @@ int vita_pmu_overflow_service(VitaPmuOverflow *overflow, const VitaPmuIo *io) {
         return VITA_PMU_ERROR_ARGS;
     /* This observer sees every IRQ while active. PMOVSR is the cheap source
      * discriminator; only an actual cycle overflow pays the ownership checks. */
-    if (!(read_reg(io, VITA_PMU_OVSR) & VITA_PMU_CYCLE_BIT)) return 0;
+    if (!(read_reg(io, VITA_PMU_OVSR) & VITA_PMU_CYCLE_BIT)) {
+        /* Our counter always runs between the preload and the wrap. Below
+         * the preload with no overflow pending means the overflow happened
+         * and PMOVSR was cleared before any entry saw it (the firmware does
+         * that around some thread switches). Left alone, the next overflow is
+         * a full 2^32 cycles away. Reload; a wrap less than one period ago
+         * still stands for this sample. */
+        if (read_reg(io, VITA_PMU_CNTEN) != VITA_PMU_CYCLE_BIT) return 0;
+        const uint32_t cycles = read_reg(io, VITA_PMU_CYCLES);
+        if (cycles >= overflow->preload) return 0;
+        if (!owns_registers(overflow, io)) return 0;
+        write_reg(io, VITA_PMU_CYCLES, overflow->preload);
+        return cycles < 0u - overflow->preload ? VITA_PMU_OVERFLOW_MISSED_RECENT : VITA_PMU_OVERFLOW_MISSED_STALE;
+    }
     /* The firmware disables every counter on IRQ entry and around thread
      * switches and re-enables them from the resumed thread's context. A
      * pending overflow observed while the counters are off is not a loss of

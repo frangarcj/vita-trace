@@ -28,8 +28,14 @@ int vita_pmu_overflow_arm(VitaPmuOverflow *overflow, const VitaPmuIo *io);
 int vita_pmu_overflow_acquire(VitaPmuOverflow *overflow, const VitaPmuIo *io,
                               uint32_t period_cycles);
 
+/* A counter found wrapped without a pending overflow: reloaded; the wrap
+ * was less than one period ago (still a valid sample) or longer (stale). */
+#define VITA_PMU_OVERFLOW_MISSED_RECENT 2
+#define VITA_PMU_OVERFLOW_MISSED_STALE 3
+
 /* Returns 1 when this IRQ was caused by the owned cycle-counter overflow,
- * 0 for an unrelated IRQ, or a negative ownership/argument error. */
+ * a VITA_PMU_OVERFLOW_MISSED_* code after recovering a lost one, 0 for an
+ * unrelated IRQ, or a negative ownership/argument error. */
 int vita_pmu_overflow_service(VitaPmuOverflow *overflow, const VitaPmuIo *io);
 
 /* Restores the pre-session cycle count and PMCR only while ownership is

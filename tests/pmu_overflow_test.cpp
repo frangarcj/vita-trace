@@ -178,3 +178,39 @@ TEST_CASE("overflow period must be nonzero") {
     CHECK(vita_pmu_overflow_acquire(&overflow, &io, 0) == VITA_PMU_ERROR_ARGS);
     CHECK(r.writes.empty());
 }
+
+TEST_CASE("overflow service recovers a wrap whose PMOVSR was cleared under it") {
+    Registers r;
+    VitaPmuOverflow overflow{};
+    auto io = r.io();
+    REQUIRE(vita_pmu_overflow_acquire(&overflow, &io, 1000) == 0);
+
+    r.cycles = 400; /* wrapped 400 cycles ago, no overflow pending */
+    CHECK(vita_pmu_overflow_service(&overflow, &io) == VITA_PMU_OVERFLOW_MISSED_RECENT);
+    CHECK(r.cycles == 0u - 1000u);
+
+    r.cycles = 50000; /* wrapped long ago: reload, but no sample */
+    CHECK(vita_pmu_overflow_service(&overflow, &io) == VITA_PMU_OVERFLOW_MISSED_STALE);
+    CHECK(r.cycles == 0u - 1000u);
+
+    r.cycles = 0u - 10u; /* counting normally toward the wrap */
+    r.writes.clear();
+    CHECK(vita_pmu_overflow_service(&overflow, &io) == 0);
+    CHECK(r.writes.empty());
+}
+
+TEST_CASE("overflow service leaves banks with other counters or a foreign PMCR alone") {
+    Registers r;
+    VitaPmuOverflow overflow{};
+    auto io = r.io();
+    REQUIRE(vita_pmu_overflow_acquire(&overflow, &io, 1000) == 0);
+    r.cycles = 5;
+    r.enabled = VITA_PMU_CYCLE_BIT | 1u;
+    r.writes.clear();
+    CHECK(vita_pmu_overflow_service(&overflow, &io) == 0);
+    r.enabled = VITA_PMU_CYCLE_BIT;
+    r.pmcr |= 0x10u; /* X: someone else's configuration */
+    CHECK(vita_pmu_overflow_service(&overflow, &io) == 0);
+    CHECK(r.writes.empty());
+    CHECK(r.cycles == 5u);
+}
