@@ -79,7 +79,6 @@ add_dependencies(tracy_vita tracy_kernel_stubs)
 
 set_target_properties(tracy_vita PROPERTIES
     VITA_TRACY_SOURCE_ROOT "${VITA_TRACY_SOURCE_DIR}"
-    VITA_TRACY_REQUIRED_KERNEL_STUB "${VITA_TRACY_BINARY_DIR}/kernel/tracy_kernel_stubs/libVitaTracyKernel_stub.a"
 )
 if(NOT VITA_TRACY_NO_DELAYED_INIT)
     set_property(TARGET tracy_vita PROPERTY VITA_TRACY_MANUAL_INIT TRUE)

@@ -5,6 +5,9 @@
 #if VITA_TRACY_AUTO_FRAMES
 #include <psp2/display.h>
 #endif
+#if defined(__vita__)
+#include <psp2/io/stat.h>
+#endif
 
 namespace {
 pthread_mutex_t emission_mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -21,6 +24,15 @@ extern "C" void vita_tracy_auto_report(const char *stage, int result) {
     char message[128];
     std::snprintf(message, sizeof(message), "vita-tracy automatic %s: %d", stage, result);
     TracyAppInfo(message, std::strlen(message));
+}
+
+extern "C" int vita_tracy_auto_kernel_opt_in(void) {
+#if defined(__vita__)
+    SceIoStat stat;
+    return sceIoGetstat("ux0:data/vita-tracy/kernel.on", &stat) >= 0;
+#else
+    return 0;
+#endif
 }
 
 #if VITA_TRACY_AUTO_FRAMES

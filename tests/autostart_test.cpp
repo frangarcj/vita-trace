@@ -11,7 +11,7 @@ extern "C" void vita_tracy_auto_stop(void);
 namespace {
 struct Fake {
     int init_result = 0, attach_result = 0, configure_result = 0, start_result = 0;
-    int sampling_result = 0, stop_result = 0;
+    int sampling_result = 0, stop_result = 0, opt_in = 1;
     int init_calls = 0, attach_calls = 0, configure_calls = 0, start_calls = 0;
     int sampling_calls = 0, stop_calls = 0;
     int main_calls = 0, argc = 0, main_result = 47, exit_status = 0, exit_result = -12;
@@ -38,6 +38,7 @@ int vita_tracy_kernel_set_sampling_ex(uint32_t hz, uint32_t flags) {
     ++fake.sampling_calls; fake.sampling_hz = hz; fake.sampling_flags = flags;
     return fake.sampling_result;
 }
+int vita_tracy_auto_kernel_opt_in(void) { return fake.opt_in; }
 void vita_tracy_auto_activate(int enabled) { fake.active = enabled != 0; }
 void vita_tracy_auto_report(const char *stage, int result) { fake.reports.emplace_back(stage,result); }
 int __real_main(int argc, char **argv) {
@@ -121,3 +122,10 @@ TEST_CASE_FIXTURE(Fixture, "automatic PC sampling failures are present in captur
     CHECK(fake.reports.back().second == -44);
 }
 #endif
+TEST_CASE_FIXTURE(Fixture, "kernel modes never call the weak control ABI without the opt-in marker") {
+    fake.opt_in = 0;
+    CHECK(__wrap_main(0, nullptr) == 47);
+    CHECK(fake.attach_calls == 0); CHECK(fake.configure_calls == 0);
+    CHECK(fake.start_calls == 0); CHECK(fake.sampling_calls == 0);
+    CHECK(fake.main_calls == 1); CHECK(fake.active);
+}

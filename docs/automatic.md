@@ -58,17 +58,22 @@ has yet been established on a console.
 
 ## Plugin loading is an explicit prerequisite
 
-**A PMU- or PC_SAMPLING-enabled executable requires the matching kernel plugin already loaded
-before the process is launched.** The helper deliberately links strong kernel
-imports, ahead of the client's optional weak archive. This is a loader-level
-dependency, not a speculative call to an unresolved weak function.
+**A PMU- or PC_SAMPLING-enabled executable attaches only when the matching
+kernel plugin was already loaded before the process launched, and only when
+`ux0:data/vita-tracy/kernel.on` exists.** The control ABI is imported weakly.
+An earlier version imported it strongly, and on the 3.60 console that hung
+the process launch (2026-09-22). A weak import the loader could not bind
+branches to address 0 and cannot be probed, so the marker is the user's
+statement that the plugin is resident. Without the marker, Tracy AppInfo
+records a skipped kernel attach and the executable runs with zones and frames
+only.
 
-It does not load or unload plugins, edit taiHEN configuration, or attempt a
-late same-process load. Load the plugin first, then launch the HB. Rebuild
-and deploy client and plugin from the same commit/ABI. The strong library
-version is not a cryptographic build identity; the runtime ABI/size checks
-still matter. Use the bring-up application's separate load and attach runs
-when managing the plugin manually.
+The helper does not load or unload plugins, edit taiHEN configuration, or
+attempt a late same-process load. Load the plugin first, create the marker,
+then launch the HB. Rebuild and deploy the client and the plugin from the same
+commit/ABI: the runtime ABI and size checks reject a mismatch. Use the
+bring-up application's separate load and attach runs when managing the plugin
+manually.
 
 Without `PMU` or `PC_SAMPLING`, no kernel control call is made by the helper.
 Adding either is a deliberate deployment choice, not a presence probe.

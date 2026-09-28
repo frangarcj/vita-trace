@@ -57,13 +57,9 @@ function(vita_tracy_enable target)
         VITA_TRACY_AUTO_SAMPLE_HZ=${VT_SAMPLE_HZ}
     )
     target_link_options("${target}" PRIVATE "-Wl,--wrap=main" "-Wl,--wrap=sceKernelExitProcess")
-    if(VT_PMU OR VT_PC_SAMPLING)
-        get_target_property(_stub tracy_vita VITA_TRACY_REQUIRED_KERNEL_STUB)
-        # Pull the strong imports before tracy_vita's optional weak archive.
-        # Kernel-backed modes require the plugin at process load, never a late
-        # load/probe of unresolved weak imports.
-        target_link_libraries("${target}" PRIVATE "-Wl,--whole-archive" "${_stub}" "-Wl,--no-whole-archive")
-    endif()
+    # Kernel-backed modes use tracy_vita's weak control-ABI import. A strong
+    # import of this runtime-loaded syscall library hung process launch on
+    # the 3.60 console (2026-09-22), so attach is gated on a marker file.
     target_link_libraries("${target}" PRIVATE tracy_vita)
     target_compile_options("${target}" PRIVATE -g)
     if(VT_FRAMES)

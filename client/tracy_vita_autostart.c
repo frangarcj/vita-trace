@@ -13,6 +13,9 @@
 #ifndef VITA_TRACY_AUTO_CORE_MASK
 #define VITA_TRACY_AUTO_CORE_MASK 7
 #endif
+#ifndef VITA_TRACY_AUTO_KERNEL_MARKER
+#define VITA_TRACY_AUTO_KERNEL_MARKER "ux0:data/vita-tracy/kernel.on"
+#endif
 #ifndef VITA_TRACY_AUTO_SAMPLE_HZ
 #define VITA_TRACY_AUTO_SAMPLE_HZ 100
 #endif
@@ -21,6 +24,7 @@ extern int __real_main(int argc, char **argv);
 extern int __real_sceKernelExitProcess(int status);
 extern void vita_tracy_auto_activate(int enabled);
 extern void vita_tracy_auto_report(const char *stage, int result);
+extern int vita_tracy_auto_kernel_opt_in(void);
 
 static uint32_t lifetime; /* 0 stopped, 1 running, 2 stopping */
 
@@ -44,8 +48,16 @@ int __wrap_main(int argc, char **argv) {
         vita_tracy_auto_report("startup", 0);
         if (cleanup_on_return) vita_tracy_auto_report("atexit registration", -1);
 #if VITA_TRACY_AUTO_PMU || VITA_TRACY_AUTO_PC_SAMPLING
-        int ret = vita_tracy_kernel_attach(0, 0);
-        vita_tracy_auto_report("kernel attach", ret);
+        /* The control ABI is a weak import: unresolved, it branches to 0 and
+         * cannot be probed. Attach only when the user says the plugin was
+         * resident at launch. */
+        int ret = -1;
+        if (!vita_tracy_auto_kernel_opt_in()) {
+            vita_tracy_auto_report("kernel attach skipped, no " VITA_TRACY_AUTO_KERNEL_MARKER, 0);
+        } else {
+            ret = vita_tracy_kernel_attach(0, 0);
+            vita_tracy_auto_report("kernel attach", ret);
+        }
         if (ret == 0) {
 #if VITA_TRACY_AUTO_PMU
             VitaTracyPmuConfig cfg = {0};
