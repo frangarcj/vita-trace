@@ -102,6 +102,9 @@ typedef struct VitaTracyStats {
     uint32_t sample_irq_core_mask;
     int32_t sample_irq_last_error;
     uint32_t sample_irq_handler_registered;
+    /* Target threads whose PMU bank the IRQ node enabled on first sight,
+     * e.g. threads created after sampling started. */
+    uint32_t sample_irq_adopted[4];
 } VitaTracyStats;
 
 #ifdef __cplusplus

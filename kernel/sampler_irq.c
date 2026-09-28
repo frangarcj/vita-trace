@@ -59,6 +59,7 @@ typedef struct IrqSampler {
     uint32_t svc_registered;
     uint32_t service_enabled;
     uint32_t emit_enabled;
+    uint32_t adopt_enabled;
     uint32_t core_mask;
     uint32_t period_cycles;
     uint32_t contexts_programmed;
@@ -119,6 +120,54 @@ typedef struct IrqPmuProbe {
     SceUID watch_tid;
 } IrqPmuProbe;
 static IrqPmuProbe g_probe;
+
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+/* Bring-up (COUNT_ONLY): every 500 ms, the target's thread states and the
+ * IRQ counters to catlog, to see what stops first when the app freezes. */
+static SceUID g_monitor = -1;
+static volatile uint32_t g_monitor_run;
+
+static int monitor_thread(SceSize args, void *argp) {
+    (void)args;
+    (void)argp;
+    uint32_t tick = 0;
+    while (g_monitor_run) {
+        VitaTracyKernelState *st = g_irq.state;
+        if (st) {
+            char tag[16];
+            snprintf(tag, sizeof(tag), "t%u", (unsigned)tick);
+            vita_tracy_pmu_ctx_status(st->target_pid, tag);
+            VITA_TRACY_TRACE("mon t%u c0 calls %u ovf %u kern %u adopt %u/%u/%u err %d\n", (unsigned)tick,
+                (unsigned)st->stats.sample_irq_calls[0], (unsigned)st->stats.sample_irq_overflows[0],
+                (unsigned)st->stats.sample_irq_kernel[0], (unsigned)st->stats.sample_irq_adopted[0],
+                (unsigned)st->stats.sample_irq_adopted[1], (unsigned)st->stats.sample_irq_adopted[2],
+                (int)st->stats.sample_irq_last_error);
+        }
+        ++tick;
+        ksceKernelDelayThread(500000);
+    }
+    return 0;
+}
+
+static void monitor_start(void) {
+    if (g_monitor >= 0) return;
+    g_monitor_run = 1;
+    g_monitor = ksceKernelCreateThread("VitaTracyIrqMon", monitor_thread, 0x10000100, 0x2000, 0,
+                                       (int)(0x10000u << 2), NULL);
+    if (g_monitor >= 0 && ksceKernelStartThread(g_monitor, 0, NULL) < 0) {
+        ksceKernelDeleteThread(g_monitor);
+        g_monitor = -1;
+    }
+}
+
+static void monitor_stop(void) {
+    if (g_monitor < 0) return;
+    g_monitor_run = 0;
+    ksceKernelWaitThreadEnd(g_monitor, NULL, NULL);
+    ksceKernelDeleteThread(g_monitor);
+    g_monitor = -1;
+}
+#endif
 
 /* The assembly entry builds our private frame and always tail-chains to the
  * next raw handler. It does not receive a Sony C exception-context pointer. */
@@ -332,6 +381,29 @@ static __attribute__((unused)) void probe_at_entry(const VitaTracyIrqFrame *cont
     }
 }
 
+/* Threads created after start inherit PMCR.E from the process default but
+ * not PMCNTENSET.C. This node runs before intrmgr saves the interrupted
+ * thread's PMU bank, so enabling the counter in the live bank of a target
+ * thread interrupted in user mode (where the bank is certainly its own) makes
+ * intrmgr store it into that thread's context. A bank with any counter
+ * enabled belongs to someone else's configuration and is left alone. */
+static void adopt_thread(uint32_t cpu_id, IrqCpu *cpu, VitaTracyKernelState *st,
+                         const VitaTracyIrqFrame *context) {
+    if (!__atomic_load_n(&g_irq.adopt_enabled, __ATOMIC_ACQUIRE)) return;
+    if (!context || (context->spsr & 0x1Fu) != 0x10u) return;
+    const VitaPmuIo *io = vita_tracy_pmu_io();
+    if (io->read(io->context, VITA_PMU_CNTEN) != 0) return;
+    if (vita_trace_control_pending(&st->control)) return;
+    SceKernelThreadContextInfo info;
+    if (vita_tracy_fw_thread_context(&info) < 0 || info.process_id != st->target_pid) return;
+    const uint32_t pmcr = io->read(io->context, VITA_PMU_PMCR);
+    io->write(io->context, VITA_PMU_PMCR, (pmcr & ~0x3Fu) | 1u); /* E only: no D, X, DP, resets */
+    io->write(io->context, VITA_PMU_OVSR, 0x80000000u);
+    io->write(io->context, VITA_PMU_CYCLES, cpu->overflow.preload);
+    io->write(io->context, VITA_PMU_CNTEN, 0x80000000u);
+    __atomic_fetch_add(&st->stats.sample_irq_adopted[cpu_id], 1u, __ATOMIC_RELAXED);
+}
+
 static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
     if (!__atomic_load_n(&g_irq.service_enabled, __ATOMIC_ACQUIRE)) return;
 #if defined(__vita__) && !defined(VITA_TRACY_TESTING)
@@ -354,7 +426,10 @@ static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
         __atomic_fetch_or(&st->irq_pending_wake, VITA_TRACY_WAKE_SAMPLE_IRQ(cpu_id), __ATOMIC_RELEASE);
         return;
     }
-    if (!ret) return;
+    if (!ret) {
+        adopt_thread(cpu_id, cpu, st, context);
+        return;
+    }
 
     __atomic_fetch_add(&st->stats.sample_irq_overflows[cpu_id], 1u, __ATOMIC_RELAXED);
     if (!__atomic_load_n(&g_irq.emit_enabled, __ATOMIC_ACQUIRE) ||
@@ -514,15 +589,22 @@ int vita_tracy_sampler_irq_start(VitaTracyKernelState *st) {
         if (ret < 0) goto fail_after_handler;
     }
     memset(&g_probe, 0, sizeof(g_probe));
+    if (!(st->sampling_flags & VITA_TRACY_SAMPLING_IRQ_SKIP_PROGRAM))
+        __atomic_store_n(&g_irq.adopt_enabled, 1u, __ATOMIC_RELEASE);
     /* The firmware keeps PMU state per thread: the interrupt source only
      * fires for threads whose saved context enables the cycle counter. */
     if (!(st->sampling_flags & VITA_TRACY_SAMPLING_IRQ_COUNT_ONLY))
         __atomic_store_n(&g_irq.emit_enabled, 1u, __ATOMIC_RELEASE);
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+    else
+        monitor_start();
+#endif
     return VITA_TRACY_OK;
 
 fail_after_handler:
     record_error(st, ret);
     __atomic_store_n(&g_irq.emit_enabled, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_irq.adopt_enabled, 0u, __ATOMIC_RELEASE);
     {
         int cleanup = vita_tracy_sampler_irq_stop(st);
         return cleanup < 0 ? cleanup : ret;
@@ -548,7 +630,9 @@ int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st) {
     if (g_irq.state && st != g_irq.state) return VITA_TRACY_ERROR_TARGET;
 
     __atomic_store_n(&g_irq.emit_enabled, 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_irq.adopt_enabled, 0u, __ATOMIC_RELEASE);
 #if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+    monitor_stop();
     release_pmu_intr();
     if (g_irq.contexts_programmed && st) {
         int rel = vita_tracy_pmu_ctx_release(st->target_pid);

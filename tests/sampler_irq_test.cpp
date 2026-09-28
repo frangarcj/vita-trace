@@ -555,3 +555,73 @@ TEST_CASE_FIXTURE(Fixture, "a process exit requested during context lookup preve
     CHECK(fake.context_queries == 1);
     CHECK(state.stats.samples_emitted[0] == 0);
 }
+
+TEST_CASE_FIXTURE(Fixture, "IRQ node adopts a target thread whose bank has no counter enabled") {
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    const uint32_t preload = 0u - (444000000u / 500u);
+    // A thread created after start: PMCR.E from the process default, no counters.
+    Bank &bank = fake.banks[1];
+    bank.enable = 0;
+    bank.pmcr = (6u << 11) | 0x10u; /* X set by someone: must be cleared */
+    bank.cycles = 12345;
+    bank.overflow = VITA_PMU_CYCLE_BIT; /* stale, counter was off */
+    VitaTracyIrqFrame context{};
+    context.spsr = 0x10u;
+    fake.core = 1;
+    vita_tracy_irq_handler_c(&context);
+    fake.core = 0;
+    CHECK(state.stats.sample_irq_adopted[1] == 1);
+    CHECK(bank.enable == VITA_PMU_CYCLE_BIT);
+    CHECK((bank.pmcr & 0x3Fu) == 1u);
+    CHECK((bank.pmcr >> 11) == 6u);
+    CHECK(bank.cycles == preload);
+    CHECK(bank.overflow == 0);
+    CHECK(state.stats.sample_irq_overflows[1] == 0);
+
+    // Once adopted, the next IRQ does not query the context again.
+    const int queries = fake.context_queries;
+    fake.core = 1;
+    vita_tracy_irq_handler_c(&context);
+    fake.core = 0;
+    CHECK(fake.context_queries == queries);
+    CHECK(state.stats.sample_irq_adopted[1] == 1);
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ node never adopts other processes, kernel mode or configured banks") {
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    VitaTracyIrqFrame context{};
+    context.spsr = 0x10u;
+
+    fake.banks[2].enable = 0;
+    fake.thread.process_id = 999;
+    fake.core = 2;
+    vita_tracy_irq_handler_c(&context);
+    CHECK(fake.banks[2].enable == 0);
+
+    fake.thread.process_id = 123;
+    context.spsr = 0x13u;
+    const int queries = fake.context_queries;
+    vita_tracy_irq_handler_c(&context);
+    CHECK(fake.context_queries == queries);
+    CHECK(fake.banks[2].enable == 0);
+
+    context.spsr = 0x10u;
+    fake.banks[2].enable = 1u; /* an event counter someone else configured */
+    vita_tracy_irq_handler_c(&context);
+    fake.core = 0;
+    CHECK(fake.banks[2].enable == 1u);
+    CHECK(state.stats.sample_irq_adopted[2] == 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ node does not adopt threads when context programming is skipped") {
+    state.sampling_flags = VITA_TRACY_SAMPLING_PMU_IRQ | VITA_TRACY_SAMPLING_IRQ_SKIP_PROGRAM;
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    VitaTracyIrqFrame context{};
+    context.spsr = 0x10u;
+    fake.banks[1].enable = 0;
+    fake.core = 1;
+    vita_tracy_irq_handler_c(&context);
+    fake.core = 0;
+    CHECK(fake.banks[1].enable == 0);
+    CHECK(state.stats.sample_irq_adopted[1] == 0);
+}
