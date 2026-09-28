@@ -1,0 +1,25 @@
+diff --git a/public/client/TracyProfiler.cpp b/public/client/TracyProfiler.cpp
+index 90ff8ea0..2f21ab53 100644
+--- a/public/client/TracyProfiler.cpp
++++ b/public/client/TracyProfiler.cpp
+@@ -1209,6 +1209,9 @@ void Profiler::EndSamplingProfiling()
+ #endif
+ }
+ 
++#ifndef TRACY_SERIAL_QUEUE_PREALLOC
++#  define TRACY_SERIAL_QUEUE_PREALLOC ( 1024*1024 )
++#endif
+ constexpr size_t QueuePrealloc = 256 * 1024;
+ 
+ TRACY_API int64_t GetFrequencyQpc()
+@@ -1532,8 +1535,8 @@ Profiler::Profiler()
+     , m_bufferOffset( 0 )
+     , m_bufferStart( 0 )
+     , m_lz4Buf( (char*)tracy_malloc( LZ4Size + sizeof( lz4sz_t ) ) )
+-    , m_serialQueue( 1024*1024 )
+-    , m_serialDequeue( 1024*1024 )
++    , m_serialQueue( TRACY_SERIAL_QUEUE_PREALLOC )
++    , m_serialDequeue( TRACY_SERIAL_QUEUE_PREALLOC )
+ #ifndef TRACY_NO_FRAME_IMAGE
+     , m_fiQueue( 16 )
+     , m_fiDequeue( 16 )

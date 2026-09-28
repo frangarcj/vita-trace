@@ -1,0 +1,16 @@
+diff --git a/public/client/tracy_concurrentqueue.h b/public/client/tracy_concurrentqueue.h
+index 2ae31cc9..acd019d0 100644
+--- a/public/client/tracy_concurrentqueue.h
++++ b/public/client/tracy_concurrentqueue.h
+@@ -141,7 +141,10 @@ struct ConcurrentQueueDefaultTraits
+ 	// but many producers, a smaller block size should be favoured. For few producers
+ 	// and/or many elements, a larger block size is preferred. A sane default
+ 	// is provided. Must be a power of 2.
+-	static const size_t BLOCK_SIZE = 64*1024;
++#ifndef TRACY_QUEUE_BLOCK_SIZE
++#  define TRACY_QUEUE_BLOCK_SIZE ( 64*1024 )
++#endif
++	static const size_t BLOCK_SIZE = TRACY_QUEUE_BLOCK_SIZE;
+ 
+ 	// For explicit producers (i.e. when using a producer token), the block is
+ 	// checked for being empty by iterating through a list of flags, one per element.

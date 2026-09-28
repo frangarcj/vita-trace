@@ -58,6 +58,23 @@ target_compile_definitions(tracy_vita PRIVATE
     TRACY_SYMBOL_OFFLINE_RESOLVE
 )
 
+# Tracy's event queue allocates in blocks of BLOCK_SIZE items (32 bytes
+# each) and starts with six of them: 12 MB of the newlib heap with the
+# upstream 64K, plus a 2 MB block for every thread that emits. A port that
+# sizes that heap to its own needs (geometrizer running Daytona USA) then runs
+# out of memory. 4K items keeps the start under 1 MB; the queue grows on
+# demand (patches/tracy/0004). Public: every TU including Tracy's headers
+# must agree on the queue layout.
+set(VITA_TRACY_QUEUE_BLOCK_SIZE "4096" CACHE STRING "Tracy event queue block size in items (power of two)")
+target_compile_definitions(tracy_vita PUBLIC TRACY_QUEUE_BLOCK_SIZE=${VITA_TRACY_QUEUE_BLOCK_SIZE})
+
+# The profiler's serial queues (locks, GPU and other serialized events) are
+# FastVectors created with room for 1M items each: 64 MB of the heap before
+# the application's main() ran, measured on the console with geometrizer.
+# They grow on demand (patches/tracy/0005).
+set(VITA_TRACY_SERIAL_QUEUE_PREALLOC "16384" CACHE STRING "Tracy serial queue items preallocated at startup")
+target_compile_definitions(tracy_vita PRIVATE TRACY_SERIAL_QUEUE_PREALLOC=${VITA_TRACY_SERIAL_QUEUE_PREALLOC})
+
 # The control ABI is imported weakly so an instrumented application still
 # loads and runs when tracy_kernel.skprx is absent.
 set(VITA_TRACY_KERNEL_STUB
