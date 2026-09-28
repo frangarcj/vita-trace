@@ -13,6 +13,11 @@ VitaTraceSharedHeader *g_shared = nullptr;
 
 extern "C" void tracy_vita_profiler_thread_enter(void) {
     const uint32_t tid = (uint32_t)sceKernelGetThreadId();
+    /* Tracy's threads start at the default priority, the same as a game's
+     * workers. A port that keeps its cores busy (geometrizer) then never lets
+     * the sender run, and nothing queued after the handshake leaves the
+     * console. Run them at the drain thread's priority; they mostly sleep. */
+    sceKernelChangeThreadPriority(0, 0x40);
     VitaTracyLockGuard lock(&g_registry_mutex);
     vita_trace_thread_add(&g_workers, tid);
     if (g_shared) vita_trace_thread_add(&g_shared->profiler_threads, tid);
