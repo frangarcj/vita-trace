@@ -145,7 +145,13 @@ the kernel thread sleeps.
    live value at every switch-out, so each thread keeps its own period. An
    overflow observed while the firmware has the counters disabled (around a
    switch) is left pending instead of being reported as ownership loss.
-4. Threads created after activation still need their contexts programmed
-   (not implemented). The GIC line for the PMU (SPI 244 on the devkit) does
-   not deliver on retail; sampling latency is bounded by the next IRQ or
+4. Threads created after activation inherit the creating thread's PMU
+   context, so the children of programmed threads count without help
+   (verified 2026-09-28). Any other target thread whose live bank has no
+   counter enabled is adopted by the IRQ node the first time it is
+   interrupted in user mode: before intrmgr saves the bank, the node enables
+   PMCR.E, the preload and PMCNTENSET.C in it. The GIC line for the PMU (SPI 244 on the devkit) does
+   not deliver on retail: the PA block it belongs to (`0xE50D0000`) does
+   not even answer reads there (see the 2026-09-28 session in
+   `docs/hardware-validation.md`); sampling latency is bounded by the next IRQ or
    syscall on that core (about 1 ms with the kernel tick).

@@ -277,3 +277,58 @@ backend live, `vitaTracyGetStats` fills the never-sampled core-3 slots and two
 core-2 PMU slots with IRQ-entry diagnostics (user entries, counter-enabled
 entries, PMOVSR sightings, live PMINTENSET/PMCR/PMCNTENSET, cycle deltas, the
 watched thread's saved context); the bring-up prints them.
+
+## Console session 2026-09-28 (PA performance-monitor block, SPI 244)
+
+Question: does the Cortex-A9 PMU overflow reach the GIC as SPI 244 once the
+PA performance-monitor block (`ScePfmReg`, physical `0xE50D0000`) is
+initialised the way devkit pamgr does it? The standalone
+`samples/pfm_probe` kernel module is loaded by the bring-up when
+`ux0:data/vita_pfm_probe.on` exists. It logs to `ux0:data/vita_pfm_probe.txt`
+and closes the file before each step.
+
+What retail 3.36 `pamgr.elf` does, read from the disassembly:
+- `module_start` returns early unless `ksceKernelCheckDipsw(212)` is set.
+- If it is set, pamgr maps the block (`KERNEL_IO_RW`, 0x2000 bytes) and reads `+0x10BC`.
+- Only when bit 0 of `+0x10BC` is clear does it register IRQ 244 ("SceKernelPaPmoni", priority 0xD0, cores 0xF) and write `+0x1048`/`+0x1050` = 0xFFFF, `+0x10C4`/`+0x10C0` = 0 and `+0x10BC` = 1.
+- The handler reads `+0x1098`, passes it to a callback and acknowledges with 0x00010003.
+- The enable path writes 0x00010003 to `+0x1098` and enables IRQ 244. It can only be reached through `ScePamgrForDriver` 0x3C12A0CD with the PA session key, and no retail module imports that NID.
+- pamgr never touches PMOVSR, PMINTENSET or PMCNTENSET.
+- `gpuinit_es4` maps the same two pages into the GPU MMU, and only on tool units in development mode.
+- `sysmem` maps the page into processes and, if DIPSW 212 is set, reserves the PA capture memory (`0x80000000`/512 MiB, or `0x78000000`/128 MiB when 213 is set).
+
+None of these modules enables a clock or releases a reset for the block, and
+the public pervasive API has no entry for it.
+
+| Step | Result |
+|---|---|
+| DIPSW 212 / 213 | 0 / 0. The PA mapping is disabled on this console. |
+| Map `0xE50D0000` (`KERNEL_IO_RW`, 0x2000) | Passes. The block UID and base address come back normally. |
+| First read, `+0x10BC` (the first register pamgr reads) | **Never completes.** The loading thread stays blocked, the console keeps running (network and FTP up), `destroy` kills the app, and VitaCompanion recovers after about 30 s. A reboot is needed to clear it. No crash dump. |
+
+No abort happened: the read simply got no answer. That fits a bus slave that
+is unclocked or powered down, not one protected by TrustZone. On retail the
+block is dead, which explains why SPI 244 has never delivered anything here.
+The write and IRQ stages never ran. Using this route would first mean finding
+whatever enables the block on a devkit. Nothing that appears in the kernel
+modules does it, so it is probably the bootloader acting on DIPSW 212.
+Until then, the raw IRQ and SVC nodes remain the sampling path.
+
+## Console session 2026-09-28 (kernel library versions 58-59, IRQ backend end to end)
+
+Same console. The catlog kernel log was captured on the Mac throughout. The
+irq_sampling eboot was run from the bring-up's title folder (VTRC00005).
+
+| Step | Result |
+|---|---|
+| Bring-up count-only, 18 s, core-0 kernel v58, yielding spinner | **No suspension**, in three runs. About 9 overflows/s sustained, stop 0. A kernel monitor thread logged every target thread's state every 500 ms (all WAITING or RUNNING). The ~8 s suspension of 2026-09-23 did not reproduce, and its cause is still unknown. |
+| Killing the app after a stopped IRQ session (v58) | **Hang**: `destroy` answers, but the next launch never starts, SceShell stops answering and a power cycle is needed. Cause: `vitaTracyWaitForData(0)` waited without a timeout whenever no IRQ sampler was live. The drain thread slept in the kernel, the process could not finish dying, and the proc-event callback that would have woken it only runs after the threads are gone. The same shape explains the 2026-09-22 hang with a timer-PMU session. |
+| Same with v59 (the wait always returns within 250 ms, or 20 ms while the IRQ node is live) | **Passes**: kill, relaunch and a second attach, repeated. The imports bind again; the "next client crashes with pc=0" symptom was the half-dead previous process. |
+| Thread created after sampling starts (`vita_tracy_late_spinner`) | Keeps overflowing at the same rate. The firmware copies the creating thread's PMU context (PMCNTENSET.C included) into the new thread, so children of programmed threads need nothing. The IRQ node's adoption of target threads whose bank has no counter enabled is a safety net for the rest. It fired once in one run. |
+| irq_sampling, full mode, 100 Hz, core-0 kernel, 120 s | 9883 overflows, 5890 samples emitted, 0 dropped; stop, detach and shutdown all 0. A capture from `tracy-capture` built from the pinned submodule (the Homebrew 0.13.1 build speaks another protocol) held 1482 samples in 33.7 s: 100 % in `Core0Hot()` on thread `irq-core0`. `tools/symbol_map.py` resolves them from the module AppInfo carried in the capture. |
+| Same, cores 0..2 kernel (mask 7) | 5509 samples in 40 s: 50.8 % `Core0Hot` (irq-core0), 24.4 % `Core1Hot` (irq-core1), 24.4 % `AppPthreadHot` (the POSIX worker), 0.3 % the main thread printing. `Core2Burst`, which runs about 0.3 ms per 12 ms, got none: its overflows land in the syscall that ends each burst and are counted as kernel-side (297 on c2). Short bursts are under-sampled until the SVC path can attribute a user PC. |
+
+Toolchain notes from the same session:
+- `std::thread` in a static VitaSDK binary throws "Enable multithreading", because libstdc++ keys thread support on a weak `pthread_cancel`.
+- Forcing that symbol in made startup crash in `pthread_mutex_unlock`, so the sample now uses `pthread_create`.
+- Any client built against an older kernel library version starts with unbound weak imports (pc=0 on the first control call). Rebuild every `.self-self` after a version bump.
