@@ -4,6 +4,7 @@
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/cpu.h>
 #include <psp2/perf.h>
+#include <psp2/power.h>
 
 #include <taihen.h>
 
@@ -383,7 +384,14 @@ void CheckKernelPlugin() {
             /* The kernel probe runs on its own for ~15 s; stay responsive. */
             g_quiet = KernelPluginMarkerExists("ux0:data/vita_tracy_quiet");
             const bool present = KernelPluginMarkerExists("ux0:data/vita_tracy_present");
+            /* Ports set the ARM clock in main(), after a link-time
+             * integration has armed the sampler (geometrizer: 444 MHz). */
+            const bool clock_change = KernelPluginMarkerExists("ux0:data/vita_tracy_clock_change");
             for (int second = 1; second <= 18; ++second) {
+                if (clock_change && second == 6) {
+                    int c = scePowerSetArmClockFrequency(444);
+                    Report("  t=5s scePowerSetArmClockFrequency(444): %d, now %d MHz", c, scePowerGetArmClockFrequency());
+                }
                 for (int tenth = 0; tenth < 10; ++tenth) {
                     sceKernelDelayThread(100000);
                     if (present) psvDebugScreenPresent();
@@ -392,10 +400,10 @@ void CheckKernelPlugin() {
                 s.size = sizeof(s);
                 s.abi_version = VITA_TRACY_ABI_VERSION;
                 if (vita_tracy_kernel_get_stats(&s) == 0) {
-                    Report("  t=%2ds c0 irq calls %u, overflows %u, kernel %u, foreign %u, ctxerr %u, adopted %u/%u/%u, error %d",
+                    Report("  t=%2ds c0 irq calls %u, overflows %u, kernel %u, foreign %u, ctxerr %u, adopted %u/%u/%u, missed %u, error %d",
                         second, s.sample_irq_calls[0], s.sample_irq_overflows[0], s.sample_irq_kernel[0],
                         s.sample_irq_not_target[0], s.sample_irq_context_errors[0], s.sample_irq_adopted[0],
-                        s.sample_irq_adopted[1], s.sample_irq_adopted[2], s.sample_irq_last_error);
+                        s.sample_irq_adopted[1], s.sample_irq_adopted[2], s.sample_irq_missed[0], s.sample_irq_last_error);
                     Report("       entry: user %u, cnten set %u, ovsr seen %u (user %u), inten %08X pmcr %08X cnten %08X, cyc sum %u",
                         s.sample_irq_calls[3], s.sample_irq_overflows[3], s.samples_emitted[3], s.samples_dropped[3],
                         s.sample_irq_kernel[3], s.sample_irq_not_target[3], s.sample_irq_context_errors[3],

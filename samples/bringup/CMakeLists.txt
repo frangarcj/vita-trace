@@ -15,6 +15,7 @@ target_link_libraries(bringup_sample
     tracy_vita
     SceDisplay_stub
     taihen_stub
+    ScePower_stub
 )
 
 vita_create_self(bringup_sample.self bringup_sample UNSAFE)
