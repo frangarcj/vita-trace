@@ -149,6 +149,9 @@ int vitaTracyWaitForData(uint32_t) {
     const auto events = runtime->events;
     runtime->events = 0; return (int)events;
 }
+// Frozen clock: the drain thread's once-a-second stats plots never fire, so
+// the stats-call handshakes below stay deterministic.
+uint64_t sceKernelGetProcessTimeWide(void) { return 0; }
 int vitaTracySetSampling(const VitaTracySamplingConfig *) { return 0; }
 int vitaTracySetPmu(const VitaTracyPmuConfig *) { return 0; }
 int vitaTracyPmuSampleStart(void) { return 0; }

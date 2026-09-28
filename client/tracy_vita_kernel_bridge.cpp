@@ -1,3 +1,4 @@
+#include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
 
@@ -243,6 +244,41 @@ bool DrainBatch() {
         return remaining;
 }
 
+/* Once a second while a viewer is connected: the kernel sampler's counters
+ * as plots, so a capture shows where samples go (kernel-mode overflows,
+ * missed wraps, other processes) without a separate stats client. */
+void EmitSamplerStats() {
+#ifdef TRACY_ON_DEMAND
+    if (!tracy::GetProfiler().IsConnected()) return;
+#endif
+    static uint64_t last_us = 0;
+    const uint64_t now_us = sceKernelGetProcessTimeWide();
+    if (now_us - last_us < 1000000u) return;
+    last_us = now_us;
+    VitaTracyStats stats{};
+    stats.size = sizeof(stats);
+    stats.abi_version = VITA_TRACY_ABI_VERSION;
+    if (vitaTracyGetStats(&stats) < 0 || !stats.sample_irq_handler_registered) return;
+    /* Tracy identifies plots by name pointer: literals only. */
+    static const char *const names[3][6] = {
+        {"vita-tracy c0 overflows", "vita-tracy c0 user samples", "vita-tracy c0 kernel-mode",
+         "vita-tracy c0 missed wraps", "vita-tracy c0 other process", "vita-tracy c0 adopted"},
+        {"vita-tracy c1 overflows", "vita-tracy c1 user samples", "vita-tracy c1 kernel-mode",
+         "vita-tracy c1 missed wraps", "vita-tracy c1 other process", "vita-tracy c1 adopted"},
+        {"vita-tracy c2 overflows", "vita-tracy c2 user samples", "vita-tracy c2 kernel-mode",
+         "vita-tracy c2 missed wraps", "vita-tracy c2 other process", "vita-tracy c2 adopted"},
+    };
+    for (uint32_t cpu = 0; cpu < 3; ++cpu) {
+        if (!(stats.sample_irq_core_mask & (1u << cpu))) continue;
+        TracyPlot(names[cpu][0], (int64_t)stats.sample_irq_overflows[cpu]);
+        TracyPlot(names[cpu][1], (int64_t)stats.samples_emitted[cpu]);
+        TracyPlot(names[cpu][2], (int64_t)stats.sample_irq_kernel[cpu]);
+        TracyPlot(names[cpu][3], (int64_t)stats.sample_irq_missed[cpu]);
+        TracyPlot(names[cpu][4], (int64_t)stats.sample_irq_not_target[cpu]);
+        TracyPlot(names[cpu][5], (int64_t)stats.sample_irq_adopted[cpu]);
+    }
+}
+
 int DrainThread(SceSize args, void *argp) {
     (void)args;
     (void)argp;
@@ -292,6 +328,7 @@ int DrainThread(SceSize args, void *argp) {
          * command posted just before this blocking syscall. No idle polling. */
         const int ret = vitaTracyWaitForData(0);
         if (ret >= 0) EmitWakeStatus((uint32_t)ret);
+        EmitSamplerStats();
         if (ret < 0) {
             g_bridge.command_result.store(ret, std::memory_order_release);
             g_bridge.draining.store(false, std::memory_order_release);
