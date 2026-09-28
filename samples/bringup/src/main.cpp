@@ -354,10 +354,18 @@ void CheckKernelPlugin() {
         g_spin = true;
         g_spin_yield = KernelPluginMarkerExists("ux0:data/vita_tracy_spin_yield");
         const bool no_spinner = KernelPluginMarkerExists("ux0:data/vita_tracy_no_spinner");
-        SceUID spinner = no_spinner ? -1 : sceKernelCreateThread("bringup-spin-c0", SpinThread, 0xBF, 0x2000, 0,
-                                               SCE_KERNEL_CPU_MASK_USER_0, nullptr);
-        if (spinner >= 0) sceKernelStartThread(spinner, 0, nullptr);
-        Report("  spinner thread on core 0: 0x%08X (%s)", (unsigned)spinner, g_spin_yield ? "yielding" : "no yields");
+        /* Late: created after sampling starts, so only the IRQ node's
+         * adoption can enable its counter. */
+        const bool late_spinner = KernelPluginMarkerExists("ux0:data/vita_tracy_late_spinner");
+        SceUID spinner = -1;
+        auto start_spinner = [&]() {
+            spinner = sceKernelCreateThread("bringup-spin-c0", SpinThread, 0xBF, 0x2000, 0,
+                                            SCE_KERNEL_CPU_MASK_USER_0, nullptr);
+            if (spinner >= 0) sceKernelStartThread(spinner, 0, nullptr);
+            Report("  spinner thread on core 0: 0x%08X (%s%s)", (unsigned)spinner,
+                   g_spin_yield ? "yielding" : "no yields", late_spinner ? ", late" : "");
+        };
+        if (!no_spinner && !late_spinner) start_spinner();
         WriteReport();
         sceKernelDelayThread(200000);
         uint32_t knobs = 0;
@@ -369,6 +377,7 @@ void CheckKernelPlugin() {
         int irq = vita_tracy_kernel_set_sampling_ex(10,
             VITA_TRACY_SAMPLING_PMU_IRQ | VITA_TRACY_SAMPLING_IRQ_COUNT_ONLY | knobs);
         Report("set_sampling(10 Hz, PMU_IRQ|COUNT_ONLY|0x%X): %d", (unsigned)knobs, irq);
+        if (irq == 0 && !no_spinner && late_spinner) start_spinner();
         WriteReport();
         if (irq == 0) {
             /* The kernel probe runs on its own for ~15 s; stay responsive. */
@@ -383,9 +392,10 @@ void CheckKernelPlugin() {
                 s.size = sizeof(s);
                 s.abi_version = VITA_TRACY_ABI_VERSION;
                 if (vita_tracy_kernel_get_stats(&s) == 0) {
-                    Report("  t=%2ds c0 irq calls %u, overflows %u, kernel %u, foreign %u, ctxerr %u, error %d",
+                    Report("  t=%2ds c0 irq calls %u, overflows %u, kernel %u, foreign %u, ctxerr %u, adopted %u/%u/%u, error %d",
                         second, s.sample_irq_calls[0], s.sample_irq_overflows[0], s.sample_irq_kernel[0],
-                        s.sample_irq_not_target[0], s.sample_irq_context_errors[0], s.sample_irq_last_error);
+                        s.sample_irq_not_target[0], s.sample_irq_context_errors[0], s.sample_irq_adopted[0],
+                        s.sample_irq_adopted[1], s.sample_irq_adopted[2], s.sample_irq_last_error);
                     Report("       entry: user %u, cnten set %u, ovsr seen %u (user %u), inten %08X pmcr %08X cnten %08X, cyc sum %u",
                         s.sample_irq_calls[3], s.sample_irq_overflows[3], s.samples_emitted[3], s.samples_dropped[3],
                         s.sample_irq_kernel[3], s.sample_irq_not_target[3], s.sample_irq_context_errors[3],
@@ -405,6 +415,12 @@ void CheckKernelPlugin() {
         WriteReport();
     }
 
+    /* A timer-PMU session makes the app kill hang (2026-09-22). */
+    if (KernelPluginMarkerExists("ux0:data/vita_tracy_no_timer_pmu")) {
+        Report("timer PMU skipped (vita_tracy_no_timer_pmu)");
+        WriteReport();
+        return;
+    }
     CheckKernelPmu();
 
     /* Timers stay enabled for the live viewer after the startup report. */
@@ -516,6 +532,14 @@ int main() {
     Report("abi version %u", (unsigned)VITA_TRACY_ABI_VERSION);
     Report("stage: main entered");
     WriteReport();
+
+    /* The probe logs to its own file from kernel side; nothing else runs. */
+    if (KernelPluginMarkerExists("ux0:data/vita_pfm_probe.on")) {
+        SceUID probe = taiLoadStartKernelModule("ux0:data/pfm_probe.skprx", 0, NULL, 0);
+        Report("pfm probe: taiLoadStartKernelModule 0x%08X", (unsigned)probe);
+        WriteReport();
+        return 0;
+    }
 
     vita_tracy_init();
     tracy::SetThreadName("bringup");

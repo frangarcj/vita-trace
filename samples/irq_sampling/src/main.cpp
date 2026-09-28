@@ -8,7 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <thread>
+#include <pthread.h>
 
 #include <tracy/Tracy.hpp>
 
@@ -176,7 +176,7 @@ void PrintStats(unsigned second, unsigned hz) {
     Report("control dropped: %u", (unsigned)stats.control_dropped);
     Report("");
     Report("Expected source PCs: Core0Hot/Core1Hot/Core2Burst/AppPthreadHot");
-    Report("Core2 intentionally sleeps. Application std::thread must remain visible.");
+    Report("Core2 intentionally sleeps. Application pthread must remain visible.");
     Report("After first successful handler registration the plugin stays resident until reboot.");
     WriteReport();
 }
@@ -231,10 +231,16 @@ int main() {
     SceUID core1 = Start("irq-app-c1", Core1Thread, SCE_KERNEL_CPU_MASK_USER_1);
     SceUID core2 = Start("irq-app-c2", Core2Thread, SCE_KERNEL_CPU_MASK_USER_2);
 
-    std::thread pthread_worker([] {
+    /* A POSIX worker, the way ports create threads. Not std::thread: the
+     * static libstdc++ treats threads as inactive unless pthread_cancel is
+     * linked, and forcing it in crashed in pthread_mutex_unlock at startup
+     * (2026-09-28). */
+    pthread_t pthread_worker;
+    const bool have_pthread = pthread_create(&pthread_worker, nullptr, [](void *) -> void * {
         tracy::SetThreadName("irq-app-pthread");
         while (g_run.load(std::memory_order_relaxed)) { AppPthreadHot(); sceKernelDelayThread(500); }
-    });
+        return nullptr;
+    }, nullptr) == 0;
 
     for (unsigned second = 1; second <= kDurationSeconds; ++second) {
         sceKernelDelayThread(1000000);
@@ -243,7 +249,7 @@ int main() {
     }
 
     g_run.store(false, std::memory_order_relaxed);
-    pthread_worker.join();
+    if (have_pthread) pthread_join(pthread_worker, nullptr);
     Stop(core0);
     Stop(core1);
     Stop(core2);
