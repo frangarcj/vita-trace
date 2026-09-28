@@ -142,16 +142,17 @@ int vitaTracyWaitForData(uint32_t timeout_us) {
     int ret = VITA_TRACY_ERROR_TARGET;
     if (vita_trace_control_target(&st->control) == (uint32_t)ksceKernelGetProcessId()) {
         unsigned int bits = 0;
-        /* The raw IRQ node cannot set the event flag, so poll its wake bits
-         * at a bounded interval while it is live. */
-        const uint32_t poll_us = 20000u;
-        SceUInt timeout = timeout_us;
-        int bounded = vita_tracy_sampler_irq_active();
-        if (bounded && (!timeout_us || timeout_us > poll_us)) timeout = poll_us;
+        /* Never block without a bound. The raw IRQ node cannot set the event
+         * flag, so its wake bits are polled every 20 ms while it is live.
+         * Otherwise the wait still returns every 250 ms: a thread asleep here
+         * without a timeout kept its process from dying, and the proc-event
+         * callback that would wake it only runs once the threads are gone,
+         * so killing the app hung SceShell (2026-09-22 and 2026-09-28). */
+        const uint32_t poll_us = vita_tracy_sampler_irq_active() ? 20000u : 250000u;
+        SceUInt timeout = (!timeout_us || timeout_us > poll_us) ? poll_us : timeout_us;
         ret = ksceKernelWaitEventFlag(st->data_event, VITA_TRACY_WAKE_ALL,
-            SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT,
-            &bits, (timeout_us || bounded) ? &timeout : NULL);
-        if (ret == (int)0x80028005 /* SCE_KERNEL_ERROR_WAIT_TIMEOUT */ && bounded) { ret = 0; bits = 0; }
+            SCE_EVENT_WAITOR | SCE_EVENT_WAITCLEAR_PAT, &bits, &timeout);
+        if (ret == (int)0x80028005 /* SCE_KERNEL_ERROR_WAIT_TIMEOUT */) { ret = 0; bits = 0; }
         if (ret >= 0) {
             bits |= __atomic_exchange_n(&st->irq_pending_wake, 0u, __ATOMIC_ACQ_REL);
             ret = (int)(bits & VITA_TRACY_WAKE_ALL);
