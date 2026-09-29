@@ -14,6 +14,10 @@ typedef struct VitaPmuOverflow {
     uint32_t preload;
     uint32_t saved_pmcr;
     uint32_t saved_cycles;
+    /* Event counters the owner also runs next to the cycle counter. A bank
+     * may enable any of them on top of the cycle counter and still be ours;
+     * set after prepare, which clears it. */
+    uint32_t event_mask;
 } VitaPmuOverflow;
 
 /* Configures the cycle counter but leaves both count and interrupt disabled.

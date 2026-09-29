@@ -21,10 +21,13 @@ int vita_tracy_pmu_ctx_init(void);
 /* Program the target process for cycle-counter overflow sampling: PMCR.E for
  * existing and future threads, PMCCNTR preload and PMCNTENSET.C in every
  * thread's saved context. `preload` is the counter start value (0 - period).
- * Returns the number of threads programmed, or a negative error. */
-int vita_tracy_pmu_ctx_program(SceUID pid, uint32_t preload);
+ * With `event_count` > 0, event counters 0..event_count-1 also get their
+ * event type, a zero count and their enable bit. Returns the number of
+ * threads programmed, or a negative error. */
+int vita_tracy_pmu_ctx_program(SceUID pid, uint32_t preload, const uint32_t *events, uint32_t event_count);
 
-/* Undo: clear the enable bit in every thread's saved context and PMCR.E. */
+/* Undo: clear the cycle and event enable bits in every thread's saved
+ * context and PMCR.E. */
 int vita_tracy_pmu_ctx_release(SceUID pid);
 void vita_tracy_pmu_ctx_dump(SceUID pid);
 void vita_tracy_pmu_ctx_status(SceUID pid, const char *tag);

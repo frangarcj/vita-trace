@@ -166,6 +166,20 @@ target_link_libraries(vita_tracy_autostart_pc_tests PRIVATE doctest::doctest)
 target_compile_features(vita_tracy_autostart_pc_tests PRIVATE cxx_std_17)
 doctest_discover_tests(vita_tracy_autostart_pc_tests TEST_PREFIX "bootstrap.pc.")
 
+add_executable(vita_tracy_autostart_events_tests
+    main.cpp autostart_test.cpp
+    ${VITA_TRACY_SOURCE_DIR}/client/tracy_vita_autostart.c
+)
+target_include_directories(vita_tracy_autostart_events_tests PRIVATE ${VITA_TRACY_SOURCE_DIR}/include)
+target_compile_definitions(vita_tracy_autostart_events_tests PRIVATE
+    VITA_TRACY_AUTO_PMU=0
+    VITA_TRACY_AUTO_PC_SAMPLING=1
+    "VITA_TRACY_AUTO_EVENTS=0x03,0x04"
+)
+target_link_libraries(vita_tracy_autostart_events_tests PRIVATE doctest::doctest)
+target_compile_features(vita_tracy_autostart_events_tests PRIVATE cxx_std_17)
+doctest_discover_tests(vita_tracy_autostart_events_tests TEST_PREFIX "bootstrap.events.")
+
 add_executable(vita_tracy_autoframe_tests
     main.cpp autoframe_test.cpp
     ${VITA_TRACY_SOURCE_DIR}/client/tracy_vita_autoemit.cpp

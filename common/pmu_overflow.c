@@ -13,10 +13,15 @@ static void write_reg(const VitaPmuIo *io, VitaPmuRegister reg, uint32_t value) 
     io->write(io->context, reg, value);
 }
 
+/* The cycle counter, plus any of the owner's event counters. */
+static int counting_for_us(const VitaPmuOverflow *overflow, uint32_t enabled) {
+    return (enabled & ~overflow->event_mask) == VITA_PMU_CYCLE_BIT;
+}
+
 static int owns_registers(const VitaPmuOverflow *overflow, const VitaPmuIo *io) {
     if ((read_reg(io, VITA_PMU_PMCR) & PMCR_CONTROL) != 1u) return 0;
     if (overflow->armed)
-        return read_reg(io, VITA_PMU_CNTEN) == VITA_PMU_CYCLE_BIT &&
+        return counting_for_us(overflow, read_reg(io, VITA_PMU_CNTEN)) &&
                read_reg(io, VITA_PMU_INTEN) == VITA_PMU_CYCLE_BIT;
     return read_reg(io, VITA_PMU_CNTEN) == 0 && read_reg(io, VITA_PMU_INTEN) == 0;
 }
@@ -76,7 +81,7 @@ int vita_pmu_overflow_service(VitaPmuOverflow *overflow, const VitaPmuIo *io) {
          * that around some thread switches). Left alone, the next overflow is
          * a full 2^32 cycles away. Reload; a wrap less than one period ago
          * still stands for this sample. */
-        if (read_reg(io, VITA_PMU_CNTEN) != VITA_PMU_CYCLE_BIT) return 0;
+        if (!counting_for_us(overflow, read_reg(io, VITA_PMU_CNTEN))) return 0;
         const uint32_t cycles = read_reg(io, VITA_PMU_CYCLES);
         if (cycles >= overflow->preload) return 0;
         if (!owns_registers(overflow, io)) return 0;

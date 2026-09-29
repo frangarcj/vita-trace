@@ -19,6 +19,7 @@ struct Fake {
     bool active = false;
     VitaTracyPmuConfig config{};
     uint32_t sampling_hz = 0, sampling_flags = 0;
+    std::vector<uint32_t> sampling_events;
     std::vector<std::pair<std::string,int>> reports;
 } fake;
 struct Fixture {
@@ -36,6 +37,11 @@ int vita_tracy_kernel_configure_pmu(const VitaTracyPmuConfig *cfg) {
 int vita_tracy_kernel_pmu_sample_start(void) { ++fake.start_calls; return fake.start_result; }
 int vita_tracy_kernel_set_sampling_ex(uint32_t hz, uint32_t flags) {
     ++fake.sampling_calls; fake.sampling_hz = hz; fake.sampling_flags = flags;
+    return fake.sampling_result;
+}
+int vita_tracy_kernel_set_sampling_events(uint32_t hz, uint32_t flags, const uint32_t *events, uint32_t count) {
+    ++fake.sampling_calls; fake.sampling_hz = hz; fake.sampling_flags = flags;
+    fake.sampling_events.assign(events, events + count);
     return fake.sampling_result;
 }
 int vita_tracy_auto_kernel_opt_in(void) { return fake.opt_in; }
@@ -120,6 +126,14 @@ TEST_CASE_FIXTURE(Fixture, "automatic PC sampling failures are present in captur
     CHECK(fake.sampling_calls == 1); CHECK(fake.active);
     CHECK(fake.reports.back().first == "PC sampling");
     CHECK(fake.reports.back().second == -44);
+}
+#endif
+#ifdef VITA_TRACY_AUTO_EVENTS
+TEST_CASE_FIXTURE(Fixture, "automatic PC sampling passes the configured PMU events") {
+    CHECK(__wrap_main(0, nullptr) == 47);
+    CHECK(fake.sampling_calls == 1);
+    CHECK(fake.sampling_flags == VITA_TRACY_SAMPLING_PMU_IRQ);
+    CHECK(fake.sampling_events == std::vector<uint32_t>{0x03, 0x04});
 }
 #endif
 TEST_CASE_FIXTURE(Fixture, "kernel modes never call the weak control ABI without the opt-in marker") {

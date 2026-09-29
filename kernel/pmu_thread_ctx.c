@@ -16,6 +16,7 @@
 #define NID_SET_PROCESS_PMCR 0x1AAFA818u      /* (pid|0, pmcr): ctx+0x64 of every thread */
 #define NID_SET_THREAD_COUNTER 0xD2BE5EFBu    /* (tid, ctr|0x1f, value): ctx+0x74 / +0x7c+8i */
 #define NID_GET_THREAD_COUNTER 0xCE99E69Cu    /* (tid, ctr, *out) */
+#define NID_SET_THREAD_EVENT 0x6ECCDCBDu      /* (tid, ctr 0..5, type): ctx+0x78+8i */
 #define NID_SET_PROCESS_DEFAULT_PMCR 0x61B9B6FAu /* (pid, val): proc+0x290, inherited */
 
 /* Thread object -> saved context, and fields inside it. */
@@ -31,6 +32,11 @@
 #define CTX_PMUSERENR 0x70u
 #define CTX_PMCCNTR 0x74u
 #define CTX_PMCNTENSET 0xF0u
+/* Event counter i: type at +0x78+8i, count at +0x7C+8i (3.60 threadmgr,
+ * 0x6ECCDCBD and 0xD2BE5EFB, disassembled 2026-09-30). */
+#define CTX_EVTYPE(i) (0x78u + 8u * (i))
+#define CTX_EVCOUNT(i) (0x7Cu + 8u * (i))
+#define PMU_EVENT_BITS 0x3Fu
 #define PMU_CYCLE_BIT 0x80000000u
 #define COUNTER_CYCLE 0x1Fu
 
@@ -39,6 +45,7 @@ typedef struct PmuCtxExports {
     int (*set_thread_counter)(SceUID tid, uint32_t counter, uint32_t value);
     int (*get_thread_counter)(SceUID tid, uint32_t counter, uint32_t *out);
     int (*set_process_default_pmcr)(SceUID pid, uint32_t pmcr);
+    int (*set_thread_event)(SceUID tid, uint32_t counter, uint32_t type); /* optional */
 } PmuCtxExports;
 
 static PmuCtxExports g_x;
@@ -64,6 +71,8 @@ int vita_tracy_pmu_ctx_init(void) {
     x.set_thread_counter = (int (*)(SceUID, uint32_t, uint32_t))a;
     if (resolve_any(NID_GET_THREAD_COUNTER, &a) < 0) { VITA_TRACY_TRACE("pmuctx: get_thread_counter unresolved\n"); return VITA_TRACY_ERROR_UNSUPPORTED; }
     x.get_thread_counter = (int (*)(SceUID, uint32_t, uint32_t *))a;
+    x.set_thread_event = resolve_any(NID_SET_THREAD_EVENT, &a) < 0 ? NULL :
+        (int (*)(SceUID, uint32_t, uint32_t))a;
     a = 0;
     if (vita_tracy_lookup_export("SceProcessmgr", LIB_PROCESSMGR_FOR_DRIVER, NID_SET_PROCESS_DEFAULT_PMCR, &a) < 0 || !a) {
         VITA_TRACY_TRACE("pmuctx: set_process_default_pmcr unresolved (optional)\n");
@@ -97,9 +106,24 @@ static uint32_t *thread_ctx(SceUID tid, uint32_t preload, int *verified) {
     return ctx; /* caller releases */
 }
 
-int vita_tracy_pmu_ctx_program(SceUID pid, uint32_t preload) {
+/* Event types and zero counts for one thread, checked through the context.
+ * Returns the enable bits to set: none unless every counter took. */
+static uint32_t program_events(SceUID tid, const uint32_t *ctx, const uint32_t *events, uint32_t count) {
+    for (uint32_t i = 0; i < count; ++i) {
+        if (g_x.set_thread_event(tid, i, events[i]) < 0 || g_x.set_thread_counter(tid, i, 0u) < 0 ||
+            ctx[CTX_EVTYPE(i) / 4] != events[i] || ctx[CTX_EVCOUNT(i) / 4] != 0u) {
+            VITA_TRACY_TRACE("pmuctx: tid=0x%08X event %u not programmed\n", (unsigned)tid, (unsigned)i);
+            return 0;
+        }
+    }
+    return (1u << count) - 1u;
+}
+
+int vita_tracy_pmu_ctx_program(SceUID pid, uint32_t preload, const uint32_t *events, uint32_t event_count) {
     int ret = vita_tracy_pmu_ctx_init();
     if (ret < 0) return ret;
+    if (event_count > 6u || (event_count && (!events || !g_x.set_thread_event)))
+        return VITA_TRACY_ERROR_UNSUPPORTED;
     SceUID ids[128];
     int count = 0;
     ret = ksceKernelGetThreadIdList(pid, ids, 128, &count);
@@ -119,7 +143,8 @@ int vita_tracy_pmu_ctx_program(SceUID pid, uint32_t preload) {
             ksceGUIDReleaseObject(ids[i]);
             continue;
         }
-        ctx[CTX_PMCNTENSET / 4] |= PMU_CYCLE_BIT;
+        const uint32_t event_bits = event_count ? program_events(ids[i], ctx, events, event_count) : 0u;
+        ctx[CTX_PMCNTENSET / 4] |= PMU_CYCLE_BIT | event_bits;
         /* The second context block: reported at ctx+0xf8 by the RE, but read
          * as 0 on hardware; the thread object's +0xf8 is the other candidate. */
         SceObjectBase *obj = NULL;
@@ -127,7 +152,11 @@ int vita_tracy_pmu_ctx_program(SceUID pid, uint32_t preload) {
             uint32_t *twin = (uint32_t *)ctx[CTX_TWIN_OFFSET / 4];
             if (!plausible_ctx(twin, ctx)) twin = NULL;
             if (twin) {
-                twin[CTX_PMCNTENSET / 4] |= PMU_CYCLE_BIT;
+                for (uint32_t e = 0; event_bits && e < event_count; ++e) {
+                    twin[CTX_EVTYPE(e) / 4] = events[e];
+                    twin[CTX_EVCOUNT(e) / 4] = 0u;
+                }
+                twin[CTX_PMCNTENSET / 4] |= PMU_CYCLE_BIT | event_bits;
                 twin[CTX_PMCR / 4] = ctx[CTX_PMCR / 4];
                 twin[CTX_PMCCNTR / 4] = preload;
             }
@@ -222,9 +251,9 @@ int vita_tracy_pmu_ctx_release(SceUID pid) {
         if (ksceGUIDReferObject(ids[i], &obj) < 0 || !obj) continue;
         uint32_t *ctx = *(uint32_t **)((uint8_t *)obj + THREAD_OBJ_CTX_OFFSET);
         if (ctx) {
-            ctx[CTX_PMCNTENSET / 4] &= ~PMU_CYCLE_BIT;
+            ctx[CTX_PMCNTENSET / 4] &= ~(PMU_CYCLE_BIT | PMU_EVENT_BITS);
             uint32_t *twin = (uint32_t *)ctx[CTX_TWIN_OFFSET / 4];
-            if (plausible_ctx(twin, ctx)) twin[CTX_PMCNTENSET / 4] &= ~PMU_CYCLE_BIT;
+            if (plausible_ctx(twin, ctx)) twin[CTX_PMCNTENSET / 4] &= ~(PMU_CYCLE_BIT | PMU_EVENT_BITS);
         }
         ksceGUIDReleaseObject(ids[i]);
     }

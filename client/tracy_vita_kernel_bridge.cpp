@@ -53,7 +53,12 @@ struct Bridge {
     bool command_pending = false; // Only accessed under g_api_mutex.
     uint32_t requested_hz = 0;
     uint32_t requested_flags = 0;
-    uint32_t sampling_hz = 0; // Rate the kernel accepted; drain thread only.
+    uint32_t requested_event_count = 0;
+    uint32_t requested_events[VITA_TRACY_MAX_SAMPLE_EVENTS]{};
+    // What the kernel accepted; drain thread only.
+    uint32_t sampling_hz = 0;
+    uint32_t sampling_event_count = 0;
+    uint32_t sampling_events[VITA_TRACY_MAX_SAMPLE_EVENTS]{};
     VitaTracyStats requested_stats{};
     VitaTracyPmuConfig requested_pmu{};
     VitaTracyClockSync clock{};
@@ -67,12 +72,20 @@ pthread_mutex_t g_api_mutex = PTHREAD_MUTEX_INITIALIZER;
 // Names are part of Tracy's pointer-based protocol and must stay immutable
 // until profiler shutdown, including across PMU reconfiguration/reconnection.
 char g_pmu_names[VITA_TRACE_CORE_COUNT][256][64]{};
+char g_event_names[VITA_TRACE_CORE_COUNT][256][64]{};
 const char *const g_cycle_names[] = {"pmu c0 whole-core cycles/s", "pmu c1 whole-core cycles/s",
     "pmu c2 whole-core cycles/s", "pmu c3 whole-core cycles/s"};
 const char *const g_interval_names[] = {"pmu c0 interval us", "pmu c1 interval us",
     "pmu c2 interval us", "pmu c3 interval us"};
 const char *const g_gap_names[] = {"pmu c0 interval rejected", "pmu c1 interval rejected",
     "pmu c2 interval rejected", "pmu c3 interval rejected"};
+
+const char *EventLabel(uint32_t event) {
+    return event == 0x68 ? "renamed" : event == 0x60 ? "icache-stall" :
+        event == 0x61 ? "dcache-stall" : event == 0x03 ? "L1D-refill" :
+        event == 0x04 ? "L1D-access" : event == 0x01 ? "L1I-refill" :
+        event == 0x10 ? "branch-mispredict" : event == 0x12 ? "branch" : "event";
+}
 
 void EmitTimedPlot(const char *name, uint64_t timestamp, double value) {
     TracyLfqPrepare(tracy::QueueType::PlotDataDouble);
@@ -99,19 +112,12 @@ void EmitPmu(const VitaTracePmuSample &sample, uint32_t cpu) {
         const uint32_t event = sample.events[i];
         if (event > 255u) continue;
         char *name = g_pmu_names[cpu][event];
-        if (!name[0]) {
-            const char *label = event == 0x68 ? "renamed" : event == 0x60 ? "icache-stall" :
-                event == 0x61 ? "dcache-stall" : event == 0x03 ? "L1D-refill" :
-                event == 0x01 ? "L1I-refill" : event == 0x10 ? "branch-mispredict" : "event";
-            snprintf(name, 64, "pmu c%u whole-core %s 0x%02X/s", (unsigned)cpu, label, (unsigned)event);
-        }
+        if (!name[0])
+            snprintf(name, 64, "pmu c%u whole-core %s 0x%02X/s", (unsigned)cpu, EventLabel(event), (unsigned)event);
         EmitTimedPlot(name, sample.timestamp, sample.values[i] * scale);
     }
 }
 
-/* Tracy owns the trace allocation once the item is committed. A kernel
- * sample carries a single PC, so the "callstack" is one frame deep; LR and
- * deeper unwinding arrive in a later phase. */
 bool ResolveSampleThread(const VitaTraceSample &sample, uint32_t &tid) {
     tid = sample.tid;
     if (sample.flags & VITA_TRACE_SAMPLE_GLOBAL_TID) {
@@ -206,11 +212,26 @@ void EmitSample(const VitaTraceSample &sample) {
     trace[0] = depth;
     for (uint32_t i = 0; i < depth; ++i) trace[1 + i] = frames[i];
 
+    /* Tracy owns the trace allocation once the item is committed. */
     TracyLfqPrepare(tracy::QueueType::CallstackSample);
     tracy::MemWrite(&item->callstackSampleFat.time, time);
     tracy::MemWrite(&item->callstackSampleFat.thread, thread);
     tracy::MemWrite(&item->callstackSampleFat.ptr, (uint64_t)trace);
     TracyLfqCommit;
+
+    /* The events share the sample's timestamp, so an offline pass can join
+     * them with its callstack. Tracy has no per-sample counters. */
+    const uint32_t events = sample.event_count < g_bridge.sampling_event_count ?
+        sample.event_count : g_bridge.sampling_event_count;
+    if (sample.cpu >= VITA_TRACE_CORE_COUNT) return;
+    for (uint32_t i = 0; i < events; ++i) {
+        const uint32_t code = g_bridge.sampling_events[i];
+        char *name = g_event_names[sample.cpu][code];
+        if (!name[0])
+            snprintf(name, 64, "vita-tracy c%u %s 0x%02X per sample", (unsigned)sample.cpu, EventLabel(code),
+                     (unsigned)code);
+        EmitTimedPlot(name, sample.timestamp, sample.events[i]);
+    }
 }
 
 void EmitControl(const VitaTraceControlRecord &record) {
@@ -376,8 +397,21 @@ int DrainThread(SceSize args, void *argp) {
                 cfg.abi_version = VITA_TRACY_ABI_VERSION;
                 cfg.frequency_hz = g_bridge.requested_hz;
                 cfg.flags = g_bridge.requested_flags;
+                cfg.event_count = g_bridge.requested_event_count;
+                for (uint32_t i = 0; i < VITA_TRACY_MAX_SAMPLE_EVENTS; ++i) cfg.events[i] = g_bridge.requested_events[i];
                 result = vitaTracySetSampling(&cfg);
-                if (result == 0) g_bridge.sampling_hz = cfg.frequency_hz;
+                if (result == 0) {
+                    g_bridge.sampling_hz = cfg.frequency_hz;
+                    g_bridge.sampling_event_count = cfg.frequency_hz ? cfg.event_count : 0u;
+                    for (uint32_t i = 0; i < VITA_TRACY_MAX_SAMPLE_EVENTS; ++i) g_bridge.sampling_events[i] = cfg.events[i];
+                }
+                if (result == 0 && g_bridge.sampling_event_count) {
+                    char info[128];
+                    int n = snprintf(info, sizeof(info), "vita-tracy events per sample (one period of the sampled thread's cycles):");
+                    for (uint32_t i = 0; i < g_bridge.sampling_event_count && n < (int)sizeof(info) - 6; ++i)
+                        n += snprintf(info + n, sizeof(info) - n, " 0x%02X", (unsigned)g_bridge.sampling_events[i]);
+                    TracyAppInfo(info, strlen(info));
+                }
                 if (result == 0 && cfg.frequency_hz && (cfg.flags & VITA_TRACY_SAMPLING_ALLOW_SUSPEND)) {
                     const char *warning = "vita-tracy: intrusive suspend diagnostics; not CPU-time samples";
                     TracyAppInfo(warning, strlen(warning));
@@ -401,6 +435,7 @@ int DrainThread(SceSize args, void *argp) {
                 if (result == 0) {
                     while (DrainBatch()) {}
                     g_bridge.sampling_hz = 0;
+                    g_bridge.sampling_event_count = 0;
                     g_bridge.draining.store(false, std::memory_order_release);
                 }
             }
@@ -633,6 +668,14 @@ int vita_tracy_kernel_configure_pmu(const VitaTracyPmuConfig *config) {
 }
 
 int vita_tracy_kernel_set_sampling_ex(uint32_t frequency_hz, uint32_t flags) {
+    return vita_tracy_kernel_set_sampling_events(frequency_hz, flags, nullptr, 0);
+}
+
+int vita_tracy_kernel_set_sampling_events(uint32_t frequency_hz, uint32_t flags,
+                                          const uint32_t *events, uint32_t event_count) {
+    if (event_count > VITA_TRACY_MAX_SAMPLE_EVENTS || (event_count && !events)) return VITA_TRACY_ERROR_ARGS;
+    for (uint32_t i = 0; i < event_count; ++i)
+        if (events[i] > 0xFFu) return VITA_TRACY_ERROR_ARGS;
     VitaTracyLockGuard lock(&g_api_mutex);
     int ret = ReadyForCommand();
     if (ret < 0) return ret;
@@ -642,6 +685,9 @@ int vita_tracy_kernel_set_sampling_ex(uint32_t frequency_hz, uint32_t flags) {
 
     g_bridge.requested_hz = frequency_hz;
     g_bridge.requested_flags = flags;
+    g_bridge.requested_event_count = event_count;
+    for (uint32_t i = 0; i < VITA_TRACY_MAX_SAMPLE_EVENTS; ++i)
+        g_bridge.requested_events[i] = i < event_count ? events[i] : 0u;
     return Submit(Sampling);
 }
 

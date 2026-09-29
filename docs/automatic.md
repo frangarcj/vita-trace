@@ -130,6 +130,12 @@ link order and SELF/VPK generation; they do not establish hardware behavior.
 The `PC_SAMPLING` option explicitly selects the experimental interrupted-PC
 source. The helper never selects it or the suspend diagnostic as a fallback.
 
+`EVENTS 0x03 0x04 ...` (with `PC_SAMPLING` only, up to six hex codes) also
+counts those Cortex-A9 PMU events per thread. Each sample then carries its
+thread's events for the period of cycles it stands for, plotted per core as
+`vita-tracy cN <event> 0xNN per sample` at the sample's timestamp. Not yet run
+on a console.
+
 `PC_SAMPLING` also compiles the executable with `-funwind-tables`, so that the
 client can rebuild each sample's callstack from `.ARM.exidx`. The flag only
 covers the executable's own sources. Add it to the application's static

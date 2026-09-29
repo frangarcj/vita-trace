@@ -214,3 +214,27 @@ TEST_CASE("overflow service leaves banks with other counters or a foreign PMCR a
     CHECK(r.writes.empty());
     CHECK(r.cycles == 5u);
 }
+
+TEST_CASE("overflow service owns banks that also run its event counters, and no others") {
+    Registers r;
+    VitaPmuOverflow overflow{};
+    auto io = r.io();
+    REQUIRE(vita_pmu_overflow_acquire(&overflow, &io, 1000) == 0);
+    overflow.event_mask = 0x3u;
+
+    r.enabled = VITA_PMU_CYCLE_BIT | 0x3u; /* a thread programmed with events */
+    r.overflow = VITA_PMU_CYCLE_BIT;
+    CHECK(vita_pmu_overflow_service(&overflow, &io) == 1);
+
+    r.enabled = VITA_PMU_CYCLE_BIT; /* one without them, e.g. the arming job */
+    r.overflow = VITA_PMU_CYCLE_BIT;
+    CHECK(vita_pmu_overflow_service(&overflow, &io) == 1);
+
+    r.enabled = VITA_PMU_CYCLE_BIT | 0x3u; /* a wrap whose PMOVSR was cleared */
+    r.cycles = 5;
+    CHECK(vita_pmu_overflow_service(&overflow, &io) == VITA_PMU_OVERFLOW_MISSED_RECENT);
+
+    r.enabled = VITA_PMU_CYCLE_BIT | 0x4u; /* a counter that is not ours */
+    r.overflow = VITA_PMU_CYCLE_BIT;
+    CHECK(vita_pmu_overflow_service(&overflow, &io) == VITA_PMU_ERROR_OWNERSHIP);
+}

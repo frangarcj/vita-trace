@@ -23,6 +23,7 @@ extern "C" {
 #include "vita_tracy/shared_ring.h"
 
 void vita_tracy_irq_handler_c(const VitaTracyIrqFrame *context);
+void vita_tracy_svc_handler_c(const VitaTracyIrqFrame *context);
 void vita_tracy_sampler_irq_test_reset(void);
 void vita_tracy_sampler_irq_set_stack(uint32_t tid, uint32_t lo, uint32_t hi);
 }
@@ -683,4 +684,78 @@ TEST_CASE_FIXTURE(Fixture, "IRQ samples carry the user stack only inside a publi
     overflow(0, context);
     REQUIRE(vita_trace_ring_try_pop(vita_trace_shared_core_ring(memory.data(), 0), &sample));
     CHECK(sample.stack_words == 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ samples carry the thread's PMU events for one period and zero them") {
+    state.sampling_event_count = 2;
+    state.sampling_events[0] = 0x03;
+    state.sampling_events[1] = 0x04;
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    Bank &bank = fake.banks[0];
+    bank.enable |= 0x3u; /* as programmed into the thread's context */
+    bank.values = {11, 22, 33, 0, 0, 0};
+    bank.select = 5;
+    VitaTracyIrqFrame context{};
+    context.spsr = 0x10u;
+    context.irq_lr = 0x81234000u + 4u;
+    VitaTraceSample sample{};
+
+    overflow(0, context);
+    REQUIRE(vita_trace_ring_try_pop(vita_trace_shared_core_ring(memory.data(), 0), &sample));
+    CHECK(sample.event_count == 2);
+    CHECK(sample.events[0] == 11);
+    CHECK(sample.events[1] == 22);
+    CHECK(sample.events[2] == 0);
+    CHECK(bank.values[0] == 0);
+    CHECK(bank.values[1] == 0);
+    CHECK(bank.values[2] == 33); /* not one of ours */
+    CHECK(bank.select == 5);     /* selector restored */
+
+    /* A period spent in the kernel is not sampled; its events go with it. */
+    bank.values = {7, 8, 0, 0, 0, 0};
+    context.spsr = 0x13u;
+    overflow(0, context);
+    CHECK_FALSE(vita_trace_ring_try_pop(vita_trace_shared_core_ring(memory.data(), 0), &sample));
+    CHECK(bank.values[0] == 0);
+    CHECK(bank.values[1] == 0);
+
+    /* So does one serviced at a syscall by the SVC node. */
+    bank.values = {9, 10, 0, 0, 0, 0};
+    bank.overflow |= VITA_PMU_CYCLE_BIT;
+    vita_tracy_svc_handler_c(&context);
+    CHECK(bank.values[0] == 0);
+    CHECK(bank.values[1] == 0);
+
+    /* A bank without our event counters enabled belongs to someone else. */
+    bank.enable = VITA_PMU_CYCLE_BIT;
+    bank.values = {5, 6, 0, 0, 0, 0};
+    context.spsr = 0x10u;
+    overflow(0, context);
+    REQUIRE(vita_trace_ring_try_pop(vita_trace_shared_core_ring(memory.data(), 0), &sample));
+    CHECK(sample.event_count == 0);
+    CHECK(bank.values[0] == 5);
+    CHECK(bank.values[1] == 6);
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ node adopts a thread with the configured PMU events") {
+    state.sampling_event_count = 2;
+    state.sampling_events[0] = 0x03;
+    state.sampling_events[1] = 0x10;
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    Bank &bank = fake.banks[1];
+    bank.enable = 0;
+    bank.values = {9, 9, 0, 0, 0, 0};
+    bank.select = 4;
+    VitaTracyIrqFrame context{};
+    context.spsr = 0x10u;
+    fake.core = 1;
+    vita_tracy_irq_handler_c(&context);
+    fake.core = 0;
+    CHECK(state.stats.sample_irq_adopted[1] == 1);
+    CHECK(bank.enable == (VITA_PMU_CYCLE_BIT | 0x3u));
+    CHECK(bank.types[0] == 0x03);
+    CHECK(bank.types[1] == 0x10);
+    CHECK(bank.values[0] == 0);
+    CHECK(bank.values[1] == 0);
+    CHECK(bank.select == 4);
 }

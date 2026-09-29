@@ -78,8 +78,14 @@ int __wrap_main(int argc, char **argv) {
                 vita_tracy_auto_report("PMU start", ret);
             }
 #elif VITA_TRACY_AUTO_PC_SAMPLING
+#ifdef VITA_TRACY_AUTO_EVENTS
+            static const uint32_t events[] = {VITA_TRACY_AUTO_EVENTS};
+            ret = vita_tracy_kernel_set_sampling_events(VITA_TRACY_AUTO_SAMPLE_HZ, VITA_TRACY_SAMPLING_PMU_IRQ,
+                                                        events, sizeof(events) / sizeof(events[0]));
+#else
             ret = vita_tracy_kernel_set_sampling_ex(
                 VITA_TRACY_AUTO_SAMPLE_HZ, VITA_TRACY_SAMPLING_PMU_IRQ);
+#endif
             vita_tracy_auto_report("PC sampling", ret);
 #endif
         }

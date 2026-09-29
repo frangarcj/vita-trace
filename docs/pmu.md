@@ -155,3 +155,32 @@ the kernel thread sleeps.
    not even answer reads there (see the 2026-09-28 session in
    `docs/hardware-validation.md`); sampling latency is bounded by the next IRQ or
    syscall on that core (about 1 ms with the kernel tick).
+
+## Per-thread events on the IRQ sampler (2026-09-30, not yet run on a console)
+
+The timer backend above cannot work on 3.60, because the PMU bank is per
+thread. The IRQ sampler already lives with that, so events now ride on it:
+
+- The firmware saves and restores the event counters with the rest of the
+  bank. In the per-thread context, counter `i` keeps its event type at
+  `+0x78+8i` and its count at `+0x7C+8i`. This comes from the 3.60 threadmgr
+  exports `0x6ECCDCBD (tid, i, type)` and `0xD2BE5EFB (tid, i, value)`,
+  disassembled on 2026-09-30.
+- `vita_tracy_pmu_ctx_program` writes each target thread's types and zero
+  counts through those exports, checks them back in the context, and only
+  then sets their PMCNTENSET bits next to the cycle bit. The IRQ node's
+  adoption of unprogrammed threads does the same in the live bank.
+- Every serviced cycle overflow of a thread with our event counters enabled
+  reads its counts and zeroes them, in the raw IRQ node and in the SVC node,
+  before intrmgr saves the bank. A sample therefore carries the events of
+  exactly one period of its thread's cycles. Periods spent in the kernel or
+  serviced at a syscall are not sampled, and their events are dropped with
+  them.
+- The overflow ownership check accepts a bank with the cycle counter plus
+  any of our event counters. A bank with any other counter enabled is still
+  someone else's.
+
+Open on hardware: whether the exports behave as disassembled for threads of
+another process, and whether any event other than cycles misbehaves under
+the firmware's disable/restore around switches.
+

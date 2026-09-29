@@ -64,9 +64,42 @@ typedef struct IrqSampler {
     uint32_t core_mask;
     uint32_t period_cycles;
     uint32_t contexts_programmed;
+    /* PMU events counted per thread next to the cycle counter, in counters
+     * 0..event_count-1; see take_events(). */
+    uint32_t event_count;
+    uint32_t events[VITA_TRACE_SAMPLE_EVENTS];
 } IrqSampler;
 
+_Static_assert(VITA_TRACE_SAMPLE_EVENTS == VITA_TRACY_MAX_SAMPLE_EVENTS, "sample and config event limits");
 static IrqSampler g_irq;
+
+static uint32_t event_mask(void) {
+    return (1u << g_irq.event_count) - 1u;
+}
+
+/* The event counts in the live bank, i.e. the interrupted thread's, since
+ * that thread's previous serviced overflow; zeroed again so that every
+ * sample covers exactly one period of cycles. Called for every serviced
+ * overflow, sampled or not. A bank without our event counters enabled
+ * belongs to a thread we never programmed and is left alone. The raw nodes
+ * run before intrmgr saves the bank, so the zeroes reach the thread's
+ * context. */
+static uint32_t take_events(uint32_t *out) {
+    const uint32_t count = g_irq.event_count;
+    if (!count) return 0;
+    const VitaPmuIo *io = vita_tracy_pmu_io();
+    const uint32_t mask = event_mask();
+    if ((io->read(io->context, VITA_PMU_CNTEN) & mask) != mask) return 0;
+    const uint32_t select = io->read(io->context, VITA_PMU_SELR);
+    for (uint32_t i = 0; i < count; ++i) {
+        io->write(io->context, VITA_PMU_SELR, i);
+        const uint32_t value = io->read(io->context, VITA_PMU_VALUE);
+        io->write(io->context, VITA_PMU_VALUE, 0u);
+        if (out) out[i] = value;
+    }
+    io->write(io->context, VITA_PMU_SELR, select);
+    return count;
+}
 
 /* User stack ranges of the target's threads, written from thread context and
  * read by the IRQ node. A thread's stack is one committed memblock (the Vita
@@ -280,9 +313,11 @@ static int core_job(SceSize size, void *arg) {
     if (cpu->operation == IRQ_PREPARE) {
         cpu->result = map_pmu_error(vita_pmu_overflow_prepare(
             &cpu->overflow, vita_tracy_pmu_io(), g_irq.period_cycles));
+        cpu->overflow.event_mask = event_mask();
     } else if (cpu->operation == IRQ_PREPARE_ARM) {
         cpu->result = map_pmu_error(vita_pmu_overflow_prepare(
             &cpu->overflow, vita_tracy_pmu_io(), g_irq.period_cycles));
+        cpu->overflow.event_mask = event_mask();
         if (cpu->result == 0)
             cpu->result = map_pmu_error(vita_pmu_overflow_arm(&cpu->overflow, vita_tracy_pmu_io()));
         if (cpu->result == 0 && g_irq.state && (g_irq.state->sampling_flags & VITA_TRACY_SAMPLING_IRQ_INTEN_ONLY))
@@ -293,7 +328,8 @@ static int core_job(SceSize size, void *arg) {
             /* Program the target threads' saved contexts from this core: the
              * ones pinned here are switched out while this job runs. */
             ksceKernelCpuResumeIntr(intr);
-            int programmed = vita_tracy_pmu_ctx_program(g_irq.state->target_pid, cpu->overflow.preload);
+            int programmed = vita_tracy_pmu_ctx_program(g_irq.state->target_pid, cpu->overflow.preload,
+                                                        g_irq.events, g_irq.event_count);
             IRQ_TRACE("irq: programmed %d target threads from core %u\n", programmed, index);
             g_irq.contexts_programmed = programmed >= 0;
             intr = ksceKernelCpuSuspendIntr();
@@ -456,7 +492,16 @@ static void adopt_thread(uint32_t cpu_id, IrqCpu *cpu, VitaTracyKernelState *st,
     io->write(io->context, VITA_PMU_PMCR, (pmcr & ~0x3Fu) | 1u); /* E only: no D, X, DP, resets */
     io->write(io->context, VITA_PMU_OVSR, 0x80000000u);
     io->write(io->context, VITA_PMU_CYCLES, cpu->overflow.preload);
-    io->write(io->context, VITA_PMU_CNTEN, 0x80000000u);
+    if (g_irq.event_count) {
+        const uint32_t select = io->read(io->context, VITA_PMU_SELR);
+        for (uint32_t i = 0; i < g_irq.event_count; ++i) {
+            io->write(io->context, VITA_PMU_SELR, i);
+            io->write(io->context, VITA_PMU_TYPE, g_irq.events[i]);
+            io->write(io->context, VITA_PMU_VALUE, 0u);
+        }
+        io->write(io->context, VITA_PMU_SELR, select);
+    }
+    io->write(io->context, VITA_PMU_CNTEN, 0x80000000u | event_mask());
     __atomic_fetch_add(&st->stats.sample_irq_adopted[cpu_id], 1u, __ATOMIC_RELAXED);
 }
 
@@ -488,6 +533,8 @@ static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
     }
     if (ret == VITA_PMU_OVERFLOW_MISSED_RECENT || ret == VITA_PMU_OVERFLOW_MISSED_STALE)
         __atomic_fetch_add(&st->stats.sample_irq_missed[cpu_id], 1u, __ATOMIC_RELAXED);
+    uint32_t events[VITA_TRACE_SAMPLE_EVENTS];
+    const uint32_t event_count = take_events(events);
     if (ret == VITA_PMU_OVERFLOW_MISSED_STALE) return;
 
     __atomic_fetch_add(&st->stats.sample_irq_overflows[cpu_id], 1u, __ATOMIC_RELAXED);
@@ -540,6 +587,9 @@ static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
     if (context->spsr & (1u << 5)) sample->flags |= VITA_TRACE_SAMPLE_THUMB;
     sample->r7 = context->r[7];
     sample->r11 = context->r[11];
+    sample->event_count = event_count;
+    for (uint32_t i = 0; i < VITA_TRACE_SAMPLE_EVENTS; ++i)
+        sample->events[i] = i < event_count ? events[i] : 0u;
     int cut;
     sample->stack_words = copy_user_stack((uint32_t)info.thread_id, context->sp, sample->stack, &cut);
     if (cut) sample->flags |= VITA_TRACE_SAMPLE_STACK_CUT;
@@ -562,6 +612,7 @@ void vita_tracy_svc_handler_c(const VitaTracyIrqFrame *context) {
         int ret = vita_pmu_overflow_service(&cpu->overflow, vita_tracy_pmu_io());
         if (ret == VITA_PMU_OVERFLOW_MISSED_RECENT || ret == VITA_PMU_OVERFLOW_MISSED_STALE)
             __atomic_fetch_add(&st->stats.sample_irq_missed[cpu_id], 1u, __ATOMIC_RELAXED);
+        if (ret > 0) take_events(NULL); /* this period is not sampled */
         if (ret > 0 && ret != VITA_PMU_OVERFLOW_MISSED_STALE) {
             __atomic_fetch_add(&st->stats.sample_irq_overflows[cpu_id], 1u, __ATOMIC_RELAXED);
             __atomic_fetch_add(&st->stats.sample_irq_kernel[cpu_id], 1u, __ATOMIC_RELAXED); /* seen at a syscall: not attributable */
@@ -601,6 +652,9 @@ int vita_tracy_sampler_irq_start(VitaTracyKernelState *st) {
     g_irq.state = st;
     g_irq.core_mask = VITA_TRACY_IRQ_CORE_MASK;
     g_irq.period_cycles = (uint32_t)period;
+    g_irq.event_count = st->sampling_event_count <= VITA_TRACE_SAMPLE_EVENTS ? st->sampling_event_count : 0u;
+    for (uint32_t i = 0; i < VITA_TRACE_SAMPLE_EVENTS; ++i)
+        g_irq.events[i] = i < g_irq.event_count ? st->sampling_events[i] : 0u;
     __atomic_store_n(&st->stats.sample_irq_arm_mhz, (uint32_t)arm_mhz, __ATOMIC_RELEASE);
     __atomic_store_n(&st->stats.sample_irq_core_mask, g_irq.core_mask, __ATOMIC_RELEASE);
     record_error(st, 0);
@@ -742,6 +796,7 @@ int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st) {
         g_irq.state = NULL;
         g_irq.core_mask = 0;
         g_irq.period_cycles = 0;
+        g_irq.event_count = 0;
     }
     if (first_error && st) record_error(st, first_error);
     return first_error;

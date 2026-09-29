@@ -36,6 +36,8 @@ typedef struct VitaTracyKernelState {
     int sampler_should_run;
     uint32_t sampling_hz;
     uint32_t sampling_flags;
+    uint32_t sampling_event_count;
+    uint32_t sampling_events[VITA_TRACY_MAX_SAMPLE_EVENTS];
     VitaTracyTickSource sample_clock;
     SceUID data_event;
     /* Wake bits raised from the raw IRQ node, which must not touch threadmgr.

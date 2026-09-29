@@ -29,6 +29,8 @@ typedef enum VitaTraceEventType {
 /* The stack copy stopped at a page a user read would fault on, before the
  * thread's stack range or the copy size ran out. */
 #define VITA_TRACE_SAMPLE_STACK_CUT 16u
+/* Most PMU events one sample can carry (VITA_TRACY_MAX_SAMPLE_EVENTS). */
+#define VITA_TRACE_SAMPLE_EVENTS 6u
 /* Words of user stack copied upward from SP at the sample, for the client to
  * unwind (see arm_unwind.h). Frames with large locals need several KB: in
  * geometrizer, memcmp <- compose() <- render() puts render's return address
@@ -44,6 +46,10 @@ typedef struct VitaTraceSample {
     uint16_t cpu;
     uint16_t flags;
     uint32_t r7, r11;     /* frame registers an unwind table may name */
+    /* PMU events this thread raised during the period of cycles the sample
+     * stands for, in the order the sampling config listed them. */
+    uint32_t event_count;
+    uint32_t events[VITA_TRACE_SAMPLE_EVENTS];
     uint32_t stack_words; /* valid words in stack[] */
     uint32_t stack[VITA_TRACE_SAMPLE_STACK_WORDS];
 } VitaTraceSample;

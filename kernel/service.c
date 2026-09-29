@@ -328,6 +328,7 @@ static int vitaTracyRegister_impl(const VitaTracyRegisterArgs *args) {
     st->target_pid = target_pid;
     st->sampling_hz = VITA_TRACE_DEFAULT_SAMPLE_HZ;
     st->sampling_flags = 0;
+    st->sampling_event_count = 0;
     memset(&st->stats, 0, sizeof(st->stats));
     vita_trace_control_set_target(&st->control, (uint32_t)target_pid);
 
@@ -412,6 +413,12 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
         ((local.flags & exclusive) == exclusive) ||
         ((local.flags & irq_only) && !(local.flags & VITA_TRACY_SAMPLING_PMU_IRQ)))
         return VITA_TRACY_ERROR_ARGS;
+    /* Events ride on the cycle-overflow samples; A9 event numbers fit a byte. */
+    if (local.event_count > VITA_TRACY_MAX_SAMPLE_EVENTS ||
+        (local.event_count && !(local.flags & VITA_TRACY_SAMPLING_PMU_IRQ)))
+        return VITA_TRACY_ERROR_ARGS;
+    for (uint32_t i = 0; i < local.event_count; ++i)
+        if (local.events[i] > 0xFFu) return VITA_TRACY_ERROR_ARGS;
 
     if (st->state != VITA_TRACY_STATE_ATTACHED && st->state != VITA_TRACY_STATE_PROFILING &&
         st->state != VITA_TRACY_STATE_STOPPED) {
@@ -434,6 +441,9 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
     }
     st->sampling_hz = local.frequency_hz;
     st->sampling_flags = local.flags;
+    st->sampling_event_count = local.event_count;
+    for (uint32_t i = 0; i < VITA_TRACY_MAX_SAMPLE_EVENTS; ++i)
+        st->sampling_events[i] = i < local.event_count ? local.events[i] : 0u;
 
     if (!transition(st, VITA_TRACY_EVENT_START)) {
         return VITA_TRACY_ERROR_STATE;

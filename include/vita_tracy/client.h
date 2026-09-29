@@ -70,6 +70,12 @@ int vita_tracy_kernel_configure_pmu(const VitaTracyPmuConfig *config);
 /* Explicit opt-in to intrusive diagnostics; see VITA_TRACY_SAMPLING_* in
  * abi.h. Control runs on the bridge worker, never permanently excluding main. */
 int vita_tracy_kernel_set_sampling_ex(uint32_t frequency_hz, uint32_t flags);
+/* Like _ex, and with VITA_TRACY_SAMPLING_PMU_IRQ also counts up to
+ * VITA_TRACY_MAX_SAMPLE_EVENTS Cortex-A9 PMU events per thread. Each sample
+ * then carries its thread's events for the period of cycles it stands for,
+ * plotted per core as "vita-tracy cN <event> per sample". */
+int vita_tracy_kernel_set_sampling_events(uint32_t frequency_hz, uint32_t flags,
+                                          const uint32_t *events, uint32_t event_count);
 int vita_tracy_kernel_get_stats(VitaTracyStats *stats);
 int vita_tracy_kernel_pmu_sample_start(void);
 int vita_tracy_kernel_pmu_sample_stop(void);

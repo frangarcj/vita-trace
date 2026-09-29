@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define VITA_TRACY_ABI_VERSION 5u
+#define VITA_TRACY_ABI_VERSION 6u
 
 /* Suspend/read/resume is a diagnostic, not CPU-time sampling. Never enable
  * it as an implicit fallback when an interrupt sampler is unavailable. */
@@ -41,11 +41,18 @@ typedef struct VitaTracyRegisterArgs {
     uint32_t flags;
 } VitaTracyRegisterArgs;
 
+/* PMU_IRQ sampling can also count up to six ARM PMU events per thread. Each
+ * sample then carries the events its thread raised during the one period of
+ * cycles that sample stands for. Event codes are Cortex-A9 PMU numbers. */
+#define VITA_TRACY_MAX_SAMPLE_EVENTS 6u
+
 typedef struct VitaTracySamplingConfig {
     uint32_t size;
     uint32_t abi_version;
     uint32_t frequency_hz;
     uint32_t flags;
+    uint32_t event_count; /* 0..VITA_TRACY_MAX_SAMPLE_EVENTS; PMU_IRQ only */
+    uint32_t events[VITA_TRACY_MAX_SAMPLE_EVENTS];
 } VitaTracySamplingConfig;
 
 #define VITA_TRACY_PMU_MAX_COUNTERS 8u
