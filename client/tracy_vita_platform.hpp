@@ -37,6 +37,9 @@ int64_t tracy_vita_get_time(void);
 void tracy_vita_profiler_thread_enter(void);
 void tracy_vita_profiler_thread_exit(void);
 void tracy_vita_profiler_threads_bind(void *shared);
+/* Names for a thread seen only in kernel context-switch records; answers
+ * Tracy's external-name query (patches/tracy/0006). Always fills both. */
+void tracy_vita_external_name(uint64_t thread, char *thread_name, char *process_name, size_t size);
 
 void *PlatformMalloc(size_t size);
 void *PlatformRealloc(void *ptr, size_t size);
@@ -63,3 +66,4 @@ bool PlatformSafeMemcpy(void *dst, const void *src, size_t size);
 #define TRACY_PLATFORM_GET_TIME tracy_vita_get_time
 #define TRACY_PLATFORM_THREAD_ENTER tracy_vita_profiler_thread_enter
 #define TRACY_PLATFORM_THREAD_EXIT tracy_vita_profiler_thread_exit
+#define TRACY_PLATFORM_EXTERNAL_NAME tracy_vita_external_name

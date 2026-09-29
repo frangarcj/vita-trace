@@ -54,6 +54,19 @@ typedef struct VitaTraceSample {
     uint32_t stack[VITA_TRACE_SAMPLE_STACK_WORDS];
 } VitaTraceSample;
 
+/* A target thread went on (IN) or off (OUT) a CPU. `tid` is what threadmgr
+ * reports: the thread's PUID, or its GUID when it has none. `reason` is the
+ * off-CPU code threadmgr passes (2 or 4; meaning not yet established). */
+#define VITA_TRACE_SWITCH_IN 1u
+#define VITA_TRACE_SWITCH_OUT 2u
+typedef struct VitaTraceSwitch {
+    uint64_t timestamp;
+    uint32_t tid;
+    uint16_t cpu;
+    uint8_t kind;
+    uint8_t reason;
+} VitaTraceSwitch;
+
 typedef struct VitaTraceThreadEvent {
     uint32_t pid;
     uint32_t tid;

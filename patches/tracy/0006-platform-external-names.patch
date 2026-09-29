@@ -1,0 +1,25 @@
+diff --git a/public/client/TracyProfiler.cpp b/public/client/TracyProfiler.cpp
+index 90ff8ea0..d7b8379f 100644
+--- a/public/client/TracyProfiler.cpp
++++ b/public/client/TracyProfiler.cpp
+@@ -3967,6 +3970,20 @@ bool Profiler::HandleServerQuery()
+     case ServerQueryExternalName:
+         QueueExternalName( ptr );
+         break;
++#endif
++#if !defined TRACY_HAS_SYSTEM_TRACING && defined TRACY_PLATFORM_EXTERNAL_NAME
++    case ServerQueryExternalName:
++    {
++        // Context switches supplied by the platform name threads the client
++        // may never have seen. The server waits for both strings of every
++        // query before a capture can finish.
++        char threadName[64];
++        char processName[64];
++        TRACY_PLATFORM_EXTERNAL_NAME( ptr, threadName, processName, sizeof( threadName ) );
++        SendString( ptr, threadName, QueueType::ExternalThreadName );
++        SendString( ptr, processName, QueueType::ExternalName );
++        break;
++    }
+ #endif
+     case ServerQueryParameter:
+         HandleParameter( ptr );

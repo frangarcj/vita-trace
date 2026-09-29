@@ -13,6 +13,7 @@ add_executable(tracy_kernel
     sampler_irq.c
     irq_entry.S
     user_read.c
+    sched_hooks.c
     sampler_pamgr.c
     service.c
     tick_source.c

@@ -136,6 +136,11 @@ thread's events for the period of cycles it stands for, plotted per core as
 `vita-tracy cN <event> 0xNN per sample` at the sample's timestamp. Not yet run
 on a console.
 
+`CONTEXT_SWITCHES` (with `PC_SAMPLING` only) also records when the
+application's threads go on and off a CPU, through threadmgr's scheduler
+hooks, and sends them to Tracy's context-switch view (CPU data, thread
+running/waiting). See `docs/sampling.md`. Not yet run on a console.
+
 `PC_SAMPLING` also compiles the executable with `-funwind-tables`, so that the
 client can rebuild each sample's callstack from `.ARM.exidx`. The flag only
 covers the executable's own sources. Add it to the application's static

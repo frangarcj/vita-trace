@@ -93,11 +93,15 @@ Two consequences:
   nothing. The client therefore rejects implausible frequencies and measures
   the timebase against `sceKernelGetProcessTimeWide` instead.
 
-`scePerfGetTimebaseValue` is unaffected: it reads a 64-bit counter straight
-out of a shared page (offset 0x88, re-read until two reads of the high word
-agree), with no ScePamgr involvement. `sceKernelPaGetTimebaseValue` reads the
-same offset in the same structure, so the design's question of whether ScePerf
-and ScePamgr share a clock domain is answered — they read the same counter.
+`scePerfGetTimebaseValue` reads a 64-bit counter at offset 0x88 (re-read
+until two reads of the high word agree). **Correction (2026-09-30):** this is
+not a shared page independent of ScePamgr. libperf's `module_start` stores
+`sceKernelPaGetIoBaseAddress()` as the base, and in 3.36 pamgr that is the
+user mapping of the performance-monitor (PFM) block, whose kernel side is
+`0xE50D0000`: the block that never answers a read on retail 3.60. On 3.60 the
+unresolved stub stores `0xFFFFFFFF` as the base anyway. ScePerf and ScePamgr
+do read the same counter, but on retail neither can, which is why the client
+times against the process timer.
 
 The rate that counter advances at is still unknown. Both prototype 1.691.011
 and retail 3.36 `pamgr` return `movw r0, #0x14d`, decimal 333 — so the value

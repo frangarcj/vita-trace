@@ -18,6 +18,7 @@ SceUID ksceKernelCreateThread(const char *name, SceKernelThreadEntry entry, int 
 int ksceKernelStartThread(SceUID thread, SceSize args, void *argp);
 int ksceKernelWaitThreadEnd(SceUID thread, int *status, SceUInt *timeout);
 int ksceKernelDeleteThread(SceUID thread);
+int ksceKernelDelayThread(SceUInt delay);
 #ifdef __cplusplus
 }
 #endif

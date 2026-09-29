@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define VITA_TRACY_ABI_VERSION 6u
+#define VITA_TRACY_ABI_VERSION 7u
 
 /* Suspend/read/resume is a diagnostic, not CPU-time sampling. Never enable
  * it as an implicit fallback when an interrupt sampler is unavailable. */
@@ -27,6 +27,9 @@ extern "C" {
 #define VITA_TRACY_SAMPLING_IRQ_SPI244 0x40u      /* register/enable GIC SPI 244 (experimental) */
 #define VITA_TRACY_SAMPLING_IRQ_INTEN_ONLY 0x80u
 #define VITA_TRACY_SAMPLING_IRQ_SVC_NODE 0x100u   /* accepted for compatibility; the SVC node is always installed */  /* arm PMINTENSET.C but keep the job's counter disabled */
+/* With PMU_IRQ: also record when the target's threads go on and off a CPU,
+ * through threadmgr's scheduler hooks (see kernel/sched_hooks.c). */
+#define VITA_TRACY_SAMPLING_CONTEXT_SWITCHES 0x200u
 #define VITA_TRACY_MAX_SAMPLE_HZ 1000u
 
 /* Every request struct starts with size + abi_version so the receiver can
@@ -45,6 +48,7 @@ typedef struct VitaTracyRegisterArgs {
  * sample then carries the events its thread raised during the one period of
  * cycles that sample stands for. Event codes are Cortex-A9 PMU numbers. */
 #define VITA_TRACY_MAX_SAMPLE_EVENTS 6u
+
 
 typedef struct VitaTracySamplingConfig {
     uint32_t size;
@@ -115,6 +119,14 @@ typedef struct VitaTracyStats {
     /* Overflows found only after PMOVSR had been cleared under us; the
      * counter was reloaded (and sampled when the wrap was recent). */
     uint32_t sample_irq_missed[4];
+    /* Scheduler hooks: installed (0/1); per core, calls for any process,
+     * records pushed for the target, records lost to a full ring or a
+     * nested entry; and the last non-target pid a hook reported. */
+    uint32_t switch_hooks_installed;
+    uint32_t switch_calls[4];
+    uint32_t switch_recorded[4];
+    uint32_t switch_dropped[4];
+    uint32_t switch_last_other_pid;
 } VitaTracyStats;
 
 #ifdef __cplusplus

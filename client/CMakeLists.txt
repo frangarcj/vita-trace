@@ -4,6 +4,7 @@ add_library(tracy_vita STATIC
     ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
     ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c
     ${VITA_TRACY_SOURCE_DIR}/common/arm_unwind.c
+    context_switches.cpp
     ${VITA_TRACY_SOURCE_DIR}/common/stack_scan.c
     clock_sync.c
     pmu_delta.c

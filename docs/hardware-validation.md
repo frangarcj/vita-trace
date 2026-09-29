@@ -332,3 +332,55 @@ Toolchain notes from the same session:
 - `std::thread` in a static VitaSDK binary throws "Enable multithreading", because libstdc++ keys thread support on a weak `pthread_cancel`.
 - Forcing that symbol in made startup crash in `pthread_mutex_unlock`, so the sample now uses `pthread_create`.
 - Any client built against an older kernel library version starts with unbound weak imports (pc=0 on the first control call). Rebuild every `.self-self` after a version bump.
+
+## Pending console checks (built 2026-09-30, kernel library version 73, ABI 7)
+
+Everything below builds and passes the host tests but has not run on a
+console. Start as usual: reboot, one bring-up run to load `tracy_kernel.skprx`
+(v73), then relaunch. Every client must be rebuilt: ABI 7 rejects older ones.
+
+**1. `irq_sampling`, full mode (100 Hz).** It now also counts L1D refills
+and accesses (events 0x03, 0x04) and installs the scheduler hooks. The
+report is `ux0:data/vita_tracy_irq.txt`. Expect:
+- `PMU-overflow IRQ sampling 100 Hz + L1D events + context switches: 0`.
+- `switch hooks 1`.
+- Per core, `calls` > 0 and `recorded` > 0, with `dropped` near 0.
+  - If `calls` > 0 but `recorded` = 0, the hook's pid is not the one we
+    compare with. `pid` and `last other pid` on the same line show both
+    values.
+- `adopted` and `missed wraps` now reach the report and the plots. Until now
+  GetStats zeroed them.
+- In the catlog: `pmuctx: optional exports event=1 enable=1 clear=1 get=1`,
+  and `set_process_default_pmcr -> 0x80029008` (DIPSW 0xE4 clear, harmless).
+- In a capture:
+  - PCs on the same functions as on 2026-09-28.
+  - Plots `vita-tracy cN L1D-refill 0x03 per sample` and `... L1D-access 0x04 ...`.
+  - The CPU data / context-switch view shows `irq-app-c0/c1/c2` on cores
+    0/1/2, and `Core2Burst`'s thread running about 0.3 ms every 12 ms.
+- Stop, detach and shutdown all return 0. Killing the app and relaunching
+  does not hang.
+
+**2. The same with `ux0:data/vita_tracy_irq_plain` present.** Plain PC
+sampling, no events or hooks. It must behave exactly as on 2026-09-28. This
+separates the new paths from the old ones if (1) fails.
+
+**3. geometrizer running Daytona** (`CONTEXT_SWITCHES EVENTS 0x03 0x04`,
+unwind tables). Same cycle as 2026-09-30. Expect:
+- about 29 fps, as with v71;
+- callstacks as before;
+- the per-sample L1D plots;
+- the `vita-tracy ARM MHz` / `CPU us per sample` plots;
+- a context-switch view that shows when the render thread waits.
+
+The capture must finish normally. If `tracy-capture` never completes,
+suspect the external-name answers (`patches/tracy/0006`).
+
+**What each new path changes, for bisecting:**
+- PMU counters are enabled through threadmgr (`72E5DA4E`) instead of a direct
+  context write. The direct write stays as the fallback.
+- Event counters are programmed per thread.
+- The scheduler hooks run inside threadmgr's scheduler. A hang right after
+  `set_sampling` with context switches points there. Retry with the plain
+  marker.
+
+3.63/3.65 lookups exist but cannot be tested on this 3.60 console.

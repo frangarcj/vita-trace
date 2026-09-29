@@ -1,10 +1,26 @@
 #include <string.h>
 
+#include <psp2/kernel/threadmgr.h>
 #include <psp2/system_param.h>
+#include <stdio.h>
 
 #include "tracy_vita_platform.hpp"
 
 extern "C" {
+
+/* Context-switch records only carry this process's threads, so the thread
+ * manager can name them; one that has already exited gets its id. */
+void tracy_vita_external_name(uint64_t thread, char *thread_name, char *process_name, size_t size) {
+    if (!size) return;
+    SceKernelThreadInfo info;
+    memset(&info, 0, sizeof(info));
+    info.size = sizeof(info);
+    if (sceKernelGetThreadInfo((SceUID)thread, &info) >= 0 && info.name[0])
+        snprintf(thread_name, size, "%s", info.name);
+    else
+        snprintf(thread_name, size, "thread 0x%08X", (unsigned)thread);
+    snprintf(process_name, size, "%s", "profiled application");
+}
 
 /* The Vita has no login accounts, so the session is identified by the
  * console rather than by a user. */

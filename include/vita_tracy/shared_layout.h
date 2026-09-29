@@ -33,6 +33,8 @@ extern "C" {
  * not share one. */
 #define VITA_TRACE_SHARED_ALIGN 64u
 #define VITA_TRACE_PMU_RING_CAPACITY 128u
+/* Context switches: 16-byte records, drained every 20 ms. */
+#define VITA_TRACE_SWITCH_RING_CAPACITY 2048u
 
 typedef struct VitaTraceSharedHeader {
     uint32_t magic;
@@ -47,6 +49,7 @@ typedef struct VitaTraceSharedHeader {
     uint32_t core_ring_offset[VITA_TRACE_CORE_COUNT];
     uint32_t control_ring_offset;
     uint32_t pmu_ring_offset[VITA_TRACE_CORE_COUNT];
+    uint32_t switch_ring_offset[VITA_TRACE_CORE_COUNT];
     VitaTraceThreadRegistry profiler_threads;
 } VitaTraceSharedHeader;
 
@@ -79,6 +82,7 @@ int vita_trace_shared_is_acknowledged(const void *mem);
 void *vita_trace_shared_core_ring(void *mem, uint32_t cpu);
 void *vita_trace_shared_control_ring(void *mem);
 void *vita_trace_shared_pmu_ring(void *mem, uint32_t cpu);
+void *vita_trace_shared_switch_ring(void *mem, uint32_t cpu);
 
 #ifdef __cplusplus
 }

@@ -27,6 +27,10 @@ constexpr const char *kReportPath = "ux0:data/vita_tracy_irq.txt";
 constexpr const char *kRatePath = "ux0:data/vita_tracy_irq_hz.txt";
 /* Present: register + service overflows, count them, emit nothing. */
 constexpr const char *kCountOnlyPath = "ux0:data/vita_tracy_irq_count_only";
+/* Plain PC sampling, without PMU events and scheduler hooks. */
+constexpr const char *kPlainPath = "ux0:data/vita_tracy_irq_plain";
+/* L1D refills and accesses per sample. */
+constexpr uint32_t kEvents[] = {0x03, 0x04};
 /* Present: register the raw IRQ node only, never arm the PMU. */
 constexpr const char *kRegisterOnlyPath = "ux0:data/vita_tracy_irq_register_only";
 constexpr unsigned kDefaultHz = 100;
@@ -174,6 +178,15 @@ void PrintStats(unsigned second, unsigned hz) {
             stats.sample_irq_context_errors[cpu]);
     }
     Report("control dropped: %u", (unsigned)stats.control_dropped);
+    Report("adopted %u/%u/%u  missed wraps %u/%u/%u",
+        stats.sample_irq_adopted[0], stats.sample_irq_adopted[1], stats.sample_irq_adopted[2],
+        stats.sample_irq_missed[0], stats.sample_irq_missed[1], stats.sample_irq_missed[2]);
+    /* Hook calls without records: the hook's pid is not ours; compare. */
+    Report("switch hooks %u  pid 0x%08X  last other pid 0x%08X", stats.switch_hooks_installed,
+        (unsigned)sceKernelGetProcessId(), (unsigned)stats.switch_last_other_pid);
+    for (unsigned cpu = 0; cpu < 3; ++cpu)
+        Report("  c%u switches: calls %u recorded %u dropped %u", cpu, stats.switch_calls[cpu],
+            stats.switch_recorded[cpu], stats.switch_dropped[cpu]);
     Report("");
     Report("Expected source PCs: Core0Hot/Core1Hot/Core2Burst/AppPthreadHot");
     Report("Core2 intentionally sleeps. Application pthread must remain visible.");
@@ -202,14 +215,18 @@ int main() {
 
     const bool register_only = MarkerExists(kRegisterOnlyPath);
     const bool count_only = register_only || MarkerExists(kCountOnlyPath);
+    const bool plain = count_only || MarkerExists(kPlainPath);
     const uint32_t flags = VITA_TRACY_SAMPLING_PMU_IRQ |
                            (count_only ? VITA_TRACY_SAMPLING_IRQ_COUNT_ONLY : 0u) |
-                           (register_only ? VITA_TRACY_SAMPLING_IRQ_REGISTER_ONLY : 0u);
+                           (register_only ? VITA_TRACY_SAMPLING_IRQ_REGISTER_ONLY : 0u) |
+                           (plain ? 0u : VITA_TRACY_SAMPLING_CONTEXT_SWITCHES);
     Report("mode: %s", register_only ? "register only (node installed, PMU never armed)"
                      : count_only ? "count only (no samples emitted)" : "full (samples emitted)");
     WriteReport();
-    const int sampling = vita_tracy_kernel_set_sampling_ex((int)hz, flags);
-    Report("PMU-overflow IRQ sampling %u Hz: %d", hz, sampling);
+    const int sampling = vita_tracy_kernel_set_sampling_events((int)hz, flags, kEvents,
+        plain ? 0u : (uint32_t)(sizeof(kEvents) / sizeof(kEvents[0])));
+    Report("PMU-overflow IRQ sampling %u Hz%s: %d", hz,
+        plain ? "" : " + L1D events + context switches", sampling);
     if (sampling < 0) {
         VitaTracyStats stats{};
         stats.size = sizeof(stats);

@@ -101,6 +101,11 @@ void vita_tracy_sampler_irq_fill_diagnostics(void);
 void vita_tracy_sampler_irq_refresh_stacks(void);
 /* Record one thread's user stack range [lo, hi); tid 0 clears the table. */
 void vita_tracy_sampler_irq_set_stack(uint32_t tid, uint32_t lo, uint32_t hi);
+/* Scheduler on/off-CPU hooks recording the target's context switches into
+ * the per-core switch rings; see sched_hooks.c. Stop before the shared
+ * block goes away. */
+int vita_tracy_sched_hooks_start(VitaTracyKernelState *st);
+void vita_tracy_sched_hooks_stop(void);
 /* IRQ context only; see user_read.c. Returns the words copied: the copy
  * stops at the first page a user read would fault on. */
 uint32_t vita_tracy_read_user_words(uint32_t *dst, uint32_t user_src, uint32_t words);

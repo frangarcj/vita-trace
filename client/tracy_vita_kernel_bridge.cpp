@@ -6,6 +6,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <atomic>
+#include <unordered_map>
+#include "context_switches.hpp"
 #include "tracy_vita_lock.hpp"
 #include "tracy_vita_platform.hpp"
 
@@ -292,6 +294,61 @@ void EmitWakeStatus(uint32_t events) {
     }
 }
 
+/* Context switches: drain-thread state only. */
+VitaContextSwitches g_switches;
+std::unordered_map<uint32_t, uint32_t> g_switch_tids;
+
+/* threadmgr reports a thread's PUID, or its GUID when it has none; samples
+ * carry GUIDs. Try the GUID->PUID resolution and keep the value otherwise. */
+uint32_t SwitchThread(uint32_t raw) {
+    auto it = g_switch_tids.find(raw);
+    if (it != g_switch_tids.end()) return it->second;
+    if (g_switch_tids.size() > 512) g_switch_tids.clear(); /* ids get reused */
+    const int resolved = vitaTracyResolveThread(raw);
+    const uint32_t tid = resolved > 0 ? (uint32_t)resolved : raw;
+    g_switch_tids.emplace(raw, tid);
+    return tid;
+}
+
+void EmitSwitch(void *, const VitaContextSwitches::Event &event) {
+    TracyLfqPrepare(tracy::QueueType::ContextSwitch);
+    tracy::MemWrite(&item->contextSwitch.time, vita_tracy_kernel_us_to_tracy_ns(&g_bridge.clock, event.timestamp));
+    tracy::MemWrite(&item->contextSwitch.oldThread, event.old_thread);
+    tracy::MemWrite(&item->contextSwitch.newThread, event.new_thread);
+    tracy::MemWrite(&item->contextSwitch.cpu, event.cpu);
+    tracy::MemWrite(&item->contextSwitch.oldThreadWaitReason, event.reason);
+    tracy::MemWrite(&item->contextSwitch.oldThreadState, (uint8_t)0);
+    tracy::MemWrite(&item->contextSwitch.previousCState, (uint8_t)0);
+    tracy::MemWrite(&item->contextSwitch.newThreadPriority, (int8_t)0);
+    tracy::MemWrite(&item->contextSwitch.oldThreadPriority, (int8_t)0);
+    TracyLfqCommit;
+}
+
+/* Records older than the time read before popping are all in the rings
+ * already (a hook stamps and pushes within microseconds), so they can be
+ * merged and emitted in order; newer ones wait for the next batch. */
+uint32_t DrainSwitches() {
+    const uint64_t watermark = (uint64_t)sceKernelGetSystemTimeWide() - 1000u;
+    uint32_t dropped = 0;
+#ifdef TRACY_ON_DEMAND
+    const bool connected = tracy::GetProfiler().IsConnected();
+#else
+    const bool connected = true;
+#endif
+    for (uint32_t cpu = 0; cpu < VITA_TRACE_CORE_COUNT; ++cpu) {
+        void *ring = vita_trace_shared_switch_ring(g_bridge.shared, cpu);
+        if (!ring) continue;
+        VitaTraceSwitch record;
+        uint32_t count = 0;
+        while (count++ < VITA_TRACE_SWITCH_RING_CAPACITY && vita_trace_ring_try_pop(ring, &record))
+            if (connected) g_switches.Add(record, SwitchThread(record.tid));
+        dropped += vita_trace_ring_dropped(ring);
+    }
+    if (connected) g_switches.Flush(watermark, EmitSwitch, nullptr);
+    else g_switches.Reset();
+    return dropped + g_switches.dropped();
+}
+
 bool DrainBatch() {
         bool remaining = false;
         void *control = vita_trace_shared_control_ring(g_bridge.shared);
@@ -327,6 +384,8 @@ bool DrainBatch() {
                 remaining |= vita_trace_ring_pending(pmu_ring) != 0;
             }
         }
+
+        dropped += DrainSwitches();
 
         /* Overflow degrades into counted drops rather than blocking the
          * producer, so the loss has to be visible in the capture. */
@@ -370,6 +429,20 @@ void EmitSamplerStats() {
         TracyPlot(names[cpu][3], (int64_t)stats.sample_irq_missed[cpu]);
         TracyPlot(names[cpu][4], (int64_t)stats.sample_irq_not_target[cpu]);
         TracyPlot(names[cpu][5], (int64_t)stats.sample_irq_adopted[cpu]);
+    }
+    if (stats.switch_hooks_installed) {
+        uint32_t calls = 0, recorded = 0, dropped = 0;
+        for (uint32_t cpu = 0; cpu < VITA_TRACE_CORE_COUNT; ++cpu) {
+            calls += stats.switch_calls[cpu];
+            recorded += stats.switch_recorded[cpu];
+            dropped += stats.switch_dropped[cpu];
+        }
+        /* Calls without records mean the hook's pid is not the one we
+         * registered with: the last one it reported says what it is. */
+        TracyPlot("vita-tracy switch hook calls", (int64_t)calls);
+        TracyPlot("vita-tracy switches recorded", (int64_t)recorded);
+        TracyPlot("vita-tracy switches dropped", (int64_t)dropped);
+        TracyPlot("vita-tracy switch last other pid", (int64_t)stats.switch_last_other_pid);
     }
     /* The IRQ sampler fixes its period in cycles from the clock it reads on
      * start. A later change (PSVshell, the game's own clock calls) changes

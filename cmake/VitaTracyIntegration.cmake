@@ -1,6 +1,6 @@
 # Link-time integration; no constructors before crt0 and no probing weak imports.
 function(vita_tracy_enable target)
-    cmake_parse_arguments(VT "PMU;FRAMES;PC_SAMPLING" "PMU_HZ;CORE_MASK;SAMPLE_HZ" "EVENTS" ${ARGN})
+    cmake_parse_arguments(VT "PMU;FRAMES;PC_SAMPLING;CONTEXT_SWITCHES" "PMU_HZ;CORE_MASK;SAMPLE_HZ" "EVENTS" ${ARGN})
     if(VT_UNPARSED_ARGUMENTS OR VT_KEYWORDS_MISSING_VALUES)
         message(FATAL_ERROR "vita_tracy_enable: unknown arguments or missing values")
     endif()
@@ -24,6 +24,9 @@ function(vita_tracy_enable target)
     endif()
     if(NOT VT_PC_SAMPLING AND DEFINED VT_SAMPLE_HZ)
         message(FATAL_ERROR "SAMPLE_HZ requires PC_SAMPLING")
+    endif()
+    if(VT_CONTEXT_SWITCHES AND NOT VT_PC_SAMPLING)
+        message(FATAL_ERROR "CONTEXT_SWITCHES requires PC_SAMPLING")
     endif()
     # Cortex-A9 PMU events counted per thread and carried by each PC sample.
     if(DEFINED VT_EVENTS)
@@ -68,6 +71,7 @@ function(vita_tracy_enable target)
     target_compile_definitions("${target}" PRIVATE
         VITA_TRACY_AUTO_PMU=$<BOOL:${VT_PMU}>
         VITA_TRACY_AUTO_PC_SAMPLING=$<BOOL:${VT_PC_SAMPLING}>
+        VITA_TRACY_AUTO_CONTEXT_SWITCHES=$<BOOL:${VT_CONTEXT_SWITCHES}>
         VITA_TRACY_AUTO_FRAMES=$<BOOL:${VT_FRAMES}>
         VITA_TRACY_AUTO_PMU_HZ=${VT_PMU_HZ}
         VITA_TRACY_AUTO_CORE_MASK=${VT_CORE_MASK}

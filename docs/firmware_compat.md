@@ -39,16 +39,24 @@ exception function pair also matches the pinned kubridge source in
 kernel resources or callbacks are created; module load itself succeeds. IRQ readers only call a resolved immutable
 pointer; they never search export tables. There is no wildcard or offset guess.
 
-The per-thread PMU context programming (`kernel/pmu_thread_ctx.c`) resolves a
-second table on first use, from the 3.60 module export tables (not named in
-vita-headers), and treats failures as `VITA_TRACY_ERROR_UNSUPPORTED`:
+The per-thread PMU context programming (`kernel/pmu_thread_ctx.c`) and the
+scheduler hooks (`kernel/sched_hooks.c`) resolve a second table on first use.
+These exports are not named in vita-headers; the names below come from
+github.com/bythos14/libperf. On 3.63+ the `SceThreadmgrForKernel` functions
+move to library `7F8593BA` with new NIDs. Those were taken from Bythos's
+libperf where it has them, and otherwise by matching the 3.60 code against
+the 3.63 and 3.65 dumps (the matcher reproduces every NID already known).
+None of the 3.63 values has run on a console.
 
-| Symbol | Module / library NID | Function NID | Established use |
+| Symbol | Library NID 3.60 / 3.63+ | Function NID 3.60 / 3.63+ | Established use |
 |---|---|---|---|
-| set process PMCR | `SceKernelThreadMgr` / `SceThreadmgrForDriver` `E2C40624` | `1AAFA818` | `(pid, pmcr)`: writes +0x64 of every thread of the process |
-| set thread counter | `SceKernelThreadMgr` / `SceThreadmgrForKernel` `A8CA0EFD` | `D2BE5EFB` | `(tid, 0x1F or 0-5, value)`: PMCCNTR / event counter in the saved context |
-| get thread counter | `SceKernelThreadMgr` / `SceThreadmgrForKernel` `A8CA0EFD` | `CE99E69C` | `(tid, counter, *out)` |
-| set process default PMCR | `SceProcessmgr` / `SceProcessmgrForDriver` `746EC971` | `61B9B6FA` | `(pid, pmcr)`: inherited by new threads |
+| set process PMCR | `E2C40624` (ForDriver, both) | `1AAFA818` | `(pid, pmcr)`: writes +0x64 of every thread of the process |
+| set thread counter | `A8CA0EFD` / `7F8593BA` | `D2BE5EFB` / `7B3368F1` | `(tid, 0x1F or 0-5, value)`: PMCCNTR / event counter in the saved context |
+| get thread counter (diagnostics) | `A8CA0EFD` / `7F8593BA` | `CE99E69C` / `170F69D6` (code match, 98 %) | `(tid, counter, *out)` |
+| set thread event | `A8CA0EFD` / `7F8593BA` | `6ECCDCBD` / `FFB9CD24` | `(tid, 0-5, type)`: +0x78+8i |
+| set / clear enable counter | `A8CA0EFD` / `7F8593BA` | `72E5DA4E` / `7F831213`, `43D13895` / `1D2A6815` | `(tid, mask)`: +0xF0, cross-core call if the thread runs elsewhere. `2EC8E376` is a stub returning `0x80020002` |
+| set on-CPU / off-CPU hook | `A8CA0EFD` / `7F8593BA` | `15AAB4F9` / `A3975A5A`, `DBE2EE32` / `F885ECCA` | single global slot; the 3.63 pair writes the same data offsets (+0x10, +0x08) |
+| set process default PMCR | `746EC971` (ForDriver, both) | `61B9B6FA` | `(pid, pmcr)`: inherited by new threads, but returns `0x80029008` unless DIPSW 0xE4 is set |
 
 The kernel also registers `SCE_EXCP_SVC` (kind 2) at priority 0 next to the
 IRQ node. The devkit `pamgr` registered GIC SPI 244 for the PMU; on retail it

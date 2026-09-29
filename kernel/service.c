@@ -404,14 +404,16 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
                                       VITA_TRACY_SAMPLING_IRQ_SKIP_ARM |
                                       VITA_TRACY_SAMPLING_IRQ_SPI244 |
                                       VITA_TRACY_SAMPLING_IRQ_INTEN_ONLY |
-                                      VITA_TRACY_SAMPLING_IRQ_SVC_NODE;
+                                      VITA_TRACY_SAMPLING_IRQ_SVC_NODE |
+                                      VITA_TRACY_SAMPLING_CONTEXT_SWITCHES;
     const uint32_t irq_only = VITA_TRACY_SAMPLING_IRQ_COUNT_ONLY |
                               VITA_TRACY_SAMPLING_IRQ_REGISTER_ONLY;
     const uint32_t exclusive = VITA_TRACY_SAMPLING_ALLOW_SUSPEND | VITA_TRACY_SAMPLING_PMU_IRQ;
     if (local.frequency_hz > VITA_TRACY_MAX_SAMPLE_HZ ||
         (local.flags & ~allowed_sampling) ||
         ((local.flags & exclusive) == exclusive) ||
-        ((local.flags & irq_only) && !(local.flags & VITA_TRACY_SAMPLING_PMU_IRQ)))
+        ((local.flags & irq_only) && !(local.flags & VITA_TRACY_SAMPLING_PMU_IRQ)) ||
+        ((local.flags & VITA_TRACY_SAMPLING_CONTEXT_SWITCHES) && !(local.flags & VITA_TRACY_SAMPLING_PMU_IRQ)))
         return VITA_TRACY_ERROR_ARGS;
     /* Events ride on the cycle-overflow samples; A9 event numbers fit a byte. */
     if (local.event_count > VITA_TRACY_MAX_SAMPLE_EVENTS ||
@@ -575,6 +577,8 @@ static int vitaTracyGetStats_impl_inner(VitaTracyStats *stats) {
     LOAD_STAT(sample_irq_core_mask);
     LOAD_STAT(sample_irq_last_error);
     LOAD_STAT(sample_irq_handler_registered);
+    LOAD_STAT(switch_hooks_installed);
+    LOAD_STAT(switch_last_other_pid);
     for (uint32_t i = 0; i < VITA_TRACE_CORE_COUNT; ++i) {
         LOAD_STAT(samples_emitted[i]); LOAD_STAT(samples_dropped[i]);
         LOAD_STAT(pmu_records[i]); LOAD_STAT(pmu_dropped[i]); LOAD_STAT(pmu_gaps[i]);
@@ -582,6 +586,8 @@ static int vitaTracyGetStats_impl_inner(VitaTracyStats *stats) {
         LOAD_STAT(sample_irq_calls[i]); LOAD_STAT(sample_irq_overflows[i]);
         LOAD_STAT(sample_irq_not_target[i]); LOAD_STAT(sample_irq_kernel[i]);
         LOAD_STAT(sample_irq_context_errors[i]);
+        LOAD_STAT(sample_irq_adopted[i]); LOAD_STAT(sample_irq_missed[i]);
+        LOAD_STAT(switch_calls[i]); LOAD_STAT(switch_recorded[i]); LOAD_STAT(switch_dropped[i]);
     }
 #undef LOAD_STAT
     if (ksceKernelCopyToUserProc(caller_pid, stats, &local, sizeof(local)) < 0) {

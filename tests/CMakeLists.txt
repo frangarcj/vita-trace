@@ -25,6 +25,8 @@ add_executable(vita_tracy_tests
     stack_scan_test.cpp
     arm_unwind_test.cpp
     ${VITA_TRACY_SOURCE_DIR}/common/arm_unwind.c
+    context_switches_test.cpp
+    ${VITA_TRACY_SOURCE_DIR}/client/context_switches.cpp
     ${VITA_TRACY_SOURCE_DIR}/common/stack_scan.c
     ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c
     ${VITA_TRACY_SOURCE_DIR}/common/pmu_core.c
@@ -98,6 +100,22 @@ target_link_libraries(vita_tracy_irq_sampler_tests PRIVATE doctest::doctest)
 target_compile_definitions(vita_tracy_irq_sampler_tests PRIVATE VITA_TRACY_TESTING=1)
 target_compile_features(vita_tracy_irq_sampler_tests PRIVATE cxx_std_17)
 doctest_discover_tests(vita_tracy_irq_sampler_tests)
+
+add_executable(vita_tracy_sched_hook_tests
+    main.cpp sched_hooks_test.cpp
+    ${VITA_TRACY_SOURCE_DIR}/kernel/sched_hooks.c
+    ${VITA_TRACY_SOURCE_DIR}/common/shared_layout.c
+    ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
+)
+target_include_directories(vita_tracy_sched_hook_tests PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/fakes
+    ${VITA_TRACY_SOURCE_DIR}/include
+    ${VITA_TRACY_SOURCE_DIR}/kernel
+)
+target_link_libraries(vita_tracy_sched_hook_tests PRIVATE doctest::doctest)
+target_compile_definitions(vita_tracy_sched_hook_tests PRIVATE VITA_TRACY_TESTING=1)
+target_compile_features(vita_tracy_sched_hook_tests PRIVATE cxx_std_17)
+doctest_discover_tests(vita_tracy_sched_hook_tests)
 
 # Exercise the alternate compiled backend, not only a mocked core-mask value.
 get_target_property(_irq_sources vita_tracy_irq_sampler_tests SOURCES)
@@ -175,6 +193,7 @@ target_compile_definitions(vita_tracy_autostart_events_tests PRIVATE
     VITA_TRACY_AUTO_PMU=0
     VITA_TRACY_AUTO_PC_SAMPLING=1
     "VITA_TRACY_AUTO_EVENTS=0x03,0x04"
+    VITA_TRACY_AUTO_CONTEXT_SWITCHES=1
 )
 target_link_libraries(vita_tracy_autostart_events_tests PRIVATE doctest::doctest)
 target_compile_features(vita_tracy_autostart_events_tests PRIVATE cxx_std_17)
@@ -193,6 +212,7 @@ doctest_discover_tests(vita_tracy_autoframe_tests)
 add_executable(vita_tracy_bridge_tests
     main.cpp bridge_failure_test.cpp
     ${VITA_TRACY_SOURCE_DIR}/client/tracy_vita_kernel_bridge.cpp
+    ${VITA_TRACY_SOURCE_DIR}/client/context_switches.cpp
     ${VITA_TRACY_SOURCE_DIR}/client/clock_sync.c
     ${VITA_TRACY_SOURCE_DIR}/common/arm_unwind.c
     ${VITA_TRACY_SOURCE_DIR}/common/stack_scan.c

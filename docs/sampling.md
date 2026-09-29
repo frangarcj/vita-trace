@@ -255,6 +255,45 @@ NID under the same module name is rejected rather than mixed silently.
 Module placement records are also deferred Tracy AppInfo, preserving initial
 metadata for an on-demand viewer that connects after attachment.
 
+## Context switches (2026-09-30, not yet run on a console)
+
+With `VITA_TRACY_SAMPLING_CONTEXT_SWITCHES` next to `PMU_IRQ`, the kernel
+installs threadmgr's two scheduler hooks (`kernel/sched_hooks.c`).
+- **What the hooks are:** threadmgr calls them right after its
+  `sched:::on-cpu` and `sched:::off-cpu` DTrace probes. pamgr was their only
+  user, and it is gone since 3.50.
+- **What they receive:** `(pid, tid, reason)` on the way off a CPU and
+  `(pid, tid, ...)` on the way on.
+- **What they do:** for the target process they stamp the time and push a
+  16-byte record into that core's switch ring. Nothing else runs in the
+  scheduler: no locks, no library copies. A nested entry or a full ring is
+  counted as a drop.
+- **Stop:** clears both slots and waits for calls in flight before the
+  shared block can go.
+
+The client merges the four rings by timestamp before sending anything.
+- **Why merge:** Tracy closes a thread's running interval on the core it
+  started on and needs each thread's intervals in order. A thread that
+  migrates would otherwise reach it on the new core before it left the old one.
+- **Watermark:** records newer than the time read before popping (minus 1 ms)
+  wait for the next batch.
+- **Pairing:** a switch-out only closes the thread that core is running. A
+  switch-in first closes whatever that core, or any other core, still marks
+  as running that thread.
+- **Thread ids:** threadmgr passes a thread's PUID, or its GUID when it has
+  none. The client tries the GUID-to-PUID resolution and otherwise keeps the
+  value.
+- **Names:** Tracy asks the client for every thread it sees in a switch.
+  `patches/tracy/0006` answers from the thread manager; without the answer a
+  capture could not finish.
+
+Unverified until a console run:
+- whether the hook's pid equals the pid the target registered with. Stats
+  and plots show `switch_calls` against `switch_recorded` and the last other
+  pid.
+- what the off-CPU reasons 2 and 4 mean. They are passed to Tracy as the wait
+  reason.
+
 ## Validation
 
 Host tests cover registry lifecycle/overflow, real ARM ELF symbol resolution

@@ -16,6 +16,9 @@
 #ifndef VITA_TRACY_AUTO_KERNEL_MARKER
 #define VITA_TRACY_AUTO_KERNEL_MARKER "ux0:data/vita-tracy/kernel.on"
 #endif
+#ifndef VITA_TRACY_AUTO_CONTEXT_SWITCHES
+#define VITA_TRACY_AUTO_CONTEXT_SWITCHES 0
+#endif
 #ifndef VITA_TRACY_AUTO_SAMPLE_HZ
 #define VITA_TRACY_AUTO_SAMPLE_HZ 100
 #endif
@@ -78,13 +81,14 @@ int __wrap_main(int argc, char **argv) {
                 vita_tracy_auto_report("PMU start", ret);
             }
 #elif VITA_TRACY_AUTO_PC_SAMPLING
+            const uint32_t flags = VITA_TRACY_SAMPLING_PMU_IRQ |
+                (VITA_TRACY_AUTO_CONTEXT_SWITCHES ? VITA_TRACY_SAMPLING_CONTEXT_SWITCHES : 0u);
 #ifdef VITA_TRACY_AUTO_EVENTS
             static const uint32_t events[] = {VITA_TRACY_AUTO_EVENTS};
-            ret = vita_tracy_kernel_set_sampling_events(VITA_TRACY_AUTO_SAMPLE_HZ, VITA_TRACY_SAMPLING_PMU_IRQ,
+            ret = vita_tracy_kernel_set_sampling_events(VITA_TRACY_AUTO_SAMPLE_HZ, flags,
                                                         events, sizeof(events) / sizeof(events[0]));
 #else
-            ret = vita_tracy_kernel_set_sampling_ex(
-                VITA_TRACY_AUTO_SAMPLE_HZ, VITA_TRACY_SAMPLING_PMU_IRQ);
+            ret = vita_tracy_kernel_set_sampling_ex(VITA_TRACY_AUTO_SAMPLE_HZ, flags);
 #endif
             vita_tracy_auto_report("PC sampling", ret);
 #endif

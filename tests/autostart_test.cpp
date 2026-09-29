@@ -71,7 +71,11 @@ TEST_CASE_FIXTURE(Fixture, "automatic bootstrap forwards main arguments and resu
 #elif VITA_TRACY_AUTO_PC_SAMPLING
     CHECK(fake.attach_calls == 1); CHECK(fake.configure_calls == 0); CHECK(fake.start_calls == 0);
     CHECK(fake.sampling_calls == 1); CHECK(fake.sampling_hz == 100);
+#if defined(VITA_TRACY_AUTO_CONTEXT_SWITCHES) && VITA_TRACY_AUTO_CONTEXT_SWITCHES
+    CHECK(fake.sampling_flags == (VITA_TRACY_SAMPLING_PMU_IRQ | VITA_TRACY_SAMPLING_CONTEXT_SWITCHES));
+#else
     CHECK(fake.sampling_flags == VITA_TRACY_SAMPLING_PMU_IRQ);
+#endif
 #else
     CHECK(fake.attach_calls == 0); CHECK(fake.configure_calls == 0); CHECK(fake.start_calls == 0);
     CHECK(fake.sampling_calls == 0);
@@ -132,7 +136,7 @@ TEST_CASE_FIXTURE(Fixture, "automatic PC sampling failures are present in captur
 TEST_CASE_FIXTURE(Fixture, "automatic PC sampling passes the configured PMU events") {
     CHECK(__wrap_main(0, nullptr) == 47);
     CHECK(fake.sampling_calls == 1);
-    CHECK(fake.sampling_flags == VITA_TRACY_SAMPLING_PMU_IRQ);
+    CHECK(fake.sampling_flags == (VITA_TRACY_SAMPLING_PMU_IRQ | VITA_TRACY_SAMPLING_CONTEXT_SWITCHES));
     CHECK(fake.sampling_events == std::vector<uint32_t>{0x03, 0x04});
 }
 #endif

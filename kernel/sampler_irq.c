@@ -718,6 +718,13 @@ int vita_tracy_sampler_irq_start(VitaTracyKernelState *st) {
 #if defined(__vita__) && !defined(VITA_TRACY_TESTING)
     else
         monitor_start();
+    /* Optional: sampling runs without them, and the stats say whether the
+     * hooks went in. */
+    if (st->sampling_flags & VITA_TRACY_SAMPLING_CONTEXT_SWITCHES) {
+        const int hooks = vita_tracy_sched_hooks_start(st);
+        IRQ_TRACE("irq: scheduler hooks -> %d\n", hooks);
+        if (hooks < 0) record_error(st, hooks);
+    }
 #endif
     return VITA_TRACY_OK;
 
@@ -753,6 +760,7 @@ int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st) {
     __atomic_store_n(&g_irq.adopt_enabled, 0u, __ATOMIC_RELEASE);
     vita_tracy_sampler_irq_set_stack(0u, 0u, 0u);
 #if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+    vita_tracy_sched_hooks_stop();
     monitor_stop();
     release_pmu_intr();
     if (g_irq.contexts_programmed && st) {
