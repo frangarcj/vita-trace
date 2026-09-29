@@ -11,12 +11,29 @@
 /* Library / function NIDs (3.60) from the decrypted module export tables.
  * Confirm against the RE notes before changing. */
 #define LIB_THREADMGR_FOR_KERNEL 0xA8CA0EFDu
+#define LIB_THREADMGR_FOR_KERNEL_363 0x7F8593BAu /* 3.63 and later */
 #define LIB_THREADMGR_FOR_DRIVER 0xE2C40624u
 #define LIB_PROCESSMGR_FOR_DRIVER 0x746EC971u
+/* ForDriver keeps its NIDs on 3.63+. The ForKernel functions move to a new
+ * library with new NIDs there; the 3.63 values come from github.com/bythos14/libperf
+ * and from matching the 3.60 code against the 3.63/3.65 dumps (2026-09-30).
+ * GetCounter's 3.63 NID is a 98 % code match, not confirmed on a console. */
 #define NID_SET_PROCESS_PMCR 0x1AAFA818u      /* (pid|0, pmcr): ctx+0x64 of every thread */
 #define NID_SET_THREAD_COUNTER 0xD2BE5EFBu    /* (tid, ctr|0x1f, value): ctx+0x74 / +0x7c+8i */
+#define NID_SET_THREAD_COUNTER_363 0x7B3368F1u
 #define NID_GET_THREAD_COUNTER 0xCE99E69Cu    /* (tid, ctr, *out) */
+#define NID_GET_THREAD_COUNTER_363 0x170F69D6u
 #define NID_SET_THREAD_EVENT 0x6ECCDCBDu      /* (tid, ctr 0..5, type): ctx+0x78+8i */
+#define NID_SET_THREAD_EVENT_363 0xFFB9CD24u
+/* (tid, mask): ctx+0xF0 |= / &= mask & 0x8000003F under the thread lock, and
+ * a cross-core call when the thread is running elsewhere. 0x2EC8E376, which
+ * looks like the enable, is a stub returning 0x80020002. */
+#define NID_SET_ENABLE_COUNTER 0x72E5DA4Eu
+#define NID_SET_ENABLE_COUNTER_363 0x7F831213u
+#define NID_CLEAR_ENABLE_COUNTER 0x43D13895u
+#define NID_CLEAR_ENABLE_COUNTER_363 0x1D2A6815u
+/* Returns 0x80029008 without effect unless DIPSW 0xE4 is set; threads inherit
+ * their creator's context anyway, and the IRQ node adopts the rest. */
 #define NID_SET_PROCESS_DEFAULT_PMCR 0x61B9B6FAu /* (pid, val): proc+0x290, inherited */
 
 /* Thread object -> saved context, and fields inside it. */
@@ -46,19 +63,26 @@ typedef struct PmuCtxExports {
     int (*get_thread_counter)(SceUID tid, uint32_t counter, uint32_t *out);
     int (*set_process_default_pmcr)(SceUID pid, uint32_t pmcr);
     int (*set_thread_event)(SceUID tid, uint32_t counter, uint32_t type); /* optional */
+    int (*set_enable)(SceUID tid, uint32_t mask);   /* optional; else direct +0xF0 write */
+    int (*clear_enable)(SceUID tid, uint32_t mask); /* optional; else direct +0xF0 write */
 } PmuCtxExports;
 
 static PmuCtxExports g_x;
 static uint32_t g_ready;
 
-static int resolve_any(uint32_t fn, uintptr_t *out) {
-    static const uint32_t libs[] = {LIB_THREADMGR_FOR_KERNEL, LIB_THREADMGR_FOR_DRIVER};
-    for (unsigned i = 0; i < 2; ++i) {
+/* `fn363` is the function's NID in the 3.63+ ForKernel library; 0 when the
+ * function keeps its NID (ForDriver). */
+static int resolve_any2(uint32_t fn, uint32_t fn363, uintptr_t *out) {
+    const uint32_t libs[] = {LIB_THREADMGR_FOR_KERNEL, LIB_THREADMGR_FOR_DRIVER, LIB_THREADMGR_FOR_KERNEL_363};
+    const uint32_t fns[] = {fn, fn, fn363 ? fn363 : fn};
+    for (unsigned i = 0; i < 3; ++i) {
         uintptr_t a = 0;
-        if (vita_tracy_lookup_export("SceKernelThreadMgr", libs[i], fn, &a) >= 0 && a) { *out = a; return 0; }
+        if (vita_tracy_lookup_export("SceKernelThreadMgr", libs[i], fns[i], &a) >= 0 && a) { *out = a; return 0; }
     }
     return VITA_TRACY_ERROR_UNSUPPORTED;
 }
+
+static int resolve_any(uint32_t fn, uintptr_t *out) { return resolve_any2(fn, 0, out); }
 
 int vita_tracy_pmu_ctx_init(void) {
     if (__atomic_load_n(&g_ready, __ATOMIC_ACQUIRE)) return 0;
@@ -67,12 +91,19 @@ int vita_tracy_pmu_ctx_init(void) {
     memset(&x, 0, sizeof(x));
     if (resolve_any(NID_SET_PROCESS_PMCR, &a) < 0) { VITA_TRACY_TRACE("pmuctx: set_process_pmcr unresolved\n"); return VITA_TRACY_ERROR_UNSUPPORTED; }
     x.set_process_pmcr = (int (*)(SceUID, uint32_t))a;
-    if (resolve_any(NID_SET_THREAD_COUNTER, &a) < 0) { VITA_TRACY_TRACE("pmuctx: set_thread_counter unresolved\n"); return VITA_TRACY_ERROR_UNSUPPORTED; }
+    if (resolve_any2(NID_SET_THREAD_COUNTER, NID_SET_THREAD_COUNTER_363, &a) < 0) { VITA_TRACY_TRACE("pmuctx: set_thread_counter unresolved\n"); return VITA_TRACY_ERROR_UNSUPPORTED; }
     x.set_thread_counter = (int (*)(SceUID, uint32_t, uint32_t))a;
-    if (resolve_any(NID_GET_THREAD_COUNTER, &a) < 0) { VITA_TRACY_TRACE("pmuctx: get_thread_counter unresolved\n"); return VITA_TRACY_ERROR_UNSUPPORTED; }
-    x.get_thread_counter = (int (*)(SceUID, uint32_t, uint32_t *))a;
-    x.set_thread_event = resolve_any(NID_SET_THREAD_EVENT, &a) < 0 ? NULL :
+    /* Diagnostics only. */
+    x.get_thread_counter = resolve_any2(NID_GET_THREAD_COUNTER, NID_GET_THREAD_COUNTER_363, &a) < 0 ? NULL :
+        (int (*)(SceUID, uint32_t, uint32_t *))a;
+    x.set_thread_event = resolve_any2(NID_SET_THREAD_EVENT, NID_SET_THREAD_EVENT_363, &a) < 0 ? NULL :
         (int (*)(SceUID, uint32_t, uint32_t))a;
+    x.set_enable = resolve_any2(NID_SET_ENABLE_COUNTER, NID_SET_ENABLE_COUNTER_363, &a) < 0 ? NULL :
+        (int (*)(SceUID, uint32_t))a;
+    x.clear_enable = resolve_any2(NID_CLEAR_ENABLE_COUNTER, NID_CLEAR_ENABLE_COUNTER_363, &a) < 0 ? NULL :
+        (int (*)(SceUID, uint32_t))a;
+    VITA_TRACY_TRACE("pmuctx: optional exports event=%d enable=%d clear=%d get=%d\n", !!x.set_thread_event,
+        !!x.set_enable, !!x.clear_enable, !!x.get_thread_counter);
     a = 0;
     if (vita_tracy_lookup_export("SceProcessmgr", LIB_PROCESSMGR_FOR_DRIVER, NID_SET_PROCESS_DEFAULT_PMCR, &a) < 0 || !a) {
         VITA_TRACY_TRACE("pmuctx: set_process_default_pmcr unresolved (optional)\n");
@@ -128,7 +159,10 @@ int vita_tracy_pmu_ctx_program(SceUID pid, uint32_t preload, const uint32_t *eve
     int count = 0;
     ret = ksceKernelGetThreadIdList(pid, ids, 128, &count);
     if (ret < 0) return ret;
-    if (g_x.set_process_default_pmcr) g_x.set_process_default_pmcr(pid, 1u);
+    if (g_x.set_process_default_pmcr) {
+        const int def = g_x.set_process_default_pmcr(pid, 1u);
+        VITA_TRACY_TRACE("pmuctx: set_process_default_pmcr -> 0x%08X (0x80029008: DIPSW 0xE4 clear)\n", (unsigned)def);
+    }
     ret = g_x.set_process_pmcr(pid, 1u);
     VITA_TRACY_TRACE("pmuctx: pid=0x%08X threads=%d set_process_pmcr -> %d\n", (unsigned)pid, count, ret);
     if (ret < 0) return ret;
@@ -144,7 +178,11 @@ int vita_tracy_pmu_ctx_program(SceUID pid, uint32_t preload, const uint32_t *eve
             continue;
         }
         const uint32_t event_bits = event_count ? program_events(ids[i], ctx, events, event_count) : 0u;
-        ctx[CTX_PMCNTENSET / 4] |= PMU_CYCLE_BIT | event_bits;
+        /* Through the firmware when available: it also reaches a thread that
+         * is running on another core, whose live bank would otherwise
+         * overwrite a direct context write at its next switch-out. */
+        const uint32_t enable = PMU_CYCLE_BIT | event_bits;
+        if (!g_x.set_enable || g_x.set_enable(ids[i], enable) < 0) ctx[CTX_PMCNTENSET / 4] |= enable;
         /* The second context block: reported at ctx+0xf8 by the RE, but read
          * as 0 on hardware; the thread object's +0xf8 is the other candidate. */
         SceObjectBase *obj = NULL;
@@ -182,7 +220,7 @@ void vita_tracy_pmu_ctx_dump(SceUID pid) {
         if (ksceGUIDReferObject(ids[i], &obj) < 0 || !obj) continue;
         uint32_t *ctx = *(uint32_t **)((uint8_t *)obj + THREAD_OBJ_CTX_OFFSET);
         uint32_t counter = 0;
-        int g = g_x.get_thread_counter(ids[i], COUNTER_CYCLE, &counter);
+        int g = g_x.get_thread_counter ? g_x.get_thread_counter(ids[i], COUNTER_CYCLE, &counter) : -1;
         SceKernelThreadInfo info;
         memset(&info, 0, sizeof(info));
         info.size = sizeof(info);
@@ -251,7 +289,8 @@ int vita_tracy_pmu_ctx_release(SceUID pid) {
         if (ksceGUIDReferObject(ids[i], &obj) < 0 || !obj) continue;
         uint32_t *ctx = *(uint32_t **)((uint8_t *)obj + THREAD_OBJ_CTX_OFFSET);
         if (ctx) {
-            ctx[CTX_PMCNTENSET / 4] &= ~(PMU_CYCLE_BIT | PMU_EVENT_BITS);
+            if (!g_x.clear_enable || g_x.clear_enable(ids[i], PMU_CYCLE_BIT | PMU_EVENT_BITS) < 0)
+                ctx[CTX_PMCNTENSET / 4] &= ~(PMU_CYCLE_BIT | PMU_EVENT_BITS);
             uint32_t *twin = (uint32_t *)ctx[CTX_TWIN_OFFSET / 4];
             if (plausible_ctx(twin, ctx)) twin[CTX_PMCNTENSET / 4] &= ~(PMU_CYCLE_BIT | PMU_EVENT_BITS);
         }
