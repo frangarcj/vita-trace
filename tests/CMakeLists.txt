@@ -26,6 +26,7 @@ add_executable(vita_tracy_tests
     arm_unwind_test.cpp
     ${VITA_TRACY_SOURCE_DIR}/common/arm_unwind.c
     context_switches_test.cpp
+    a9_events_test.cpp
     ${VITA_TRACY_SOURCE_DIR}/client/context_switches.cpp
     ${VITA_TRACY_SOURCE_DIR}/common/stack_scan.c
     ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c

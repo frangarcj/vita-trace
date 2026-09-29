@@ -49,6 +49,15 @@ typedef struct VitaTracyRegisterArgs {
  * cycles that sample stands for. Event codes are Cortex-A9 PMU numbers. */
 #define VITA_TRACY_MAX_SAMPLE_EVENTS 6u
 
+/* The Cortex-A9 PMU events: exactly the set ScePerf's
+ * scePerfArmPmonSelectEvent accepts on 3.60 (0x08 and 0x0E are not
+ * implemented on the A9). */
+static inline int vita_tracy_a9_event_valid(uint32_t e) {
+    return e <= 0x07u || (e >= 0x09u && e <= 0x0Du) || (e >= 0x0Fu && e <= 0x12u) ||
+           (e >= 0x40u && e <= 0x42u) || e == 0x50u || e == 0x51u || (e >= 0x60u && e <= 0x68u) ||
+           e == 0x6Eu || (e >= 0x70u && e <= 0x74u) || (e >= 0x80u && e <= 0x86u) ||
+           e == 0x8Au || e == 0x8Bu || (e >= 0x90u && e <= 0x93u) || (e >= 0xA0u && e <= 0xA5u);
+}
 
 typedef struct VitaTracySamplingConfig {
     uint32_t size;

@@ -420,7 +420,7 @@ static int vitaTracySetSampling_impl(const VitaTracySamplingConfig *cfg) {
         (local.event_count && !(local.flags & VITA_TRACY_SAMPLING_PMU_IRQ)))
         return VITA_TRACY_ERROR_ARGS;
     for (uint32_t i = 0; i < local.event_count; ++i)
-        if (local.events[i] > 0xFFu) return VITA_TRACY_ERROR_ARGS;
+        if (!vita_tracy_a9_event_valid(local.events[i])) return VITA_TRACY_ERROR_ARGS;
 
     if (st->state != VITA_TRACY_STATE_ATTACHED && st->state != VITA_TRACY_STATE_PROFILING &&
         st->state != VITA_TRACY_STATE_STOPPED) {

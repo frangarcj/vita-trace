@@ -82,11 +82,39 @@ const char *const g_interval_names[] = {"pmu c0 interval us", "pmu c1 interval u
 const char *const g_gap_names[] = {"pmu c0 interval rejected", "pmu c1 interval rejected",
     "pmu c2 interval rejected", "pmu c3 interval rejected"};
 
+/* Short names for the Cortex-A9 PMU events (A9 TRM, "PMU events"). */
 const char *EventLabel(uint32_t event) {
-    return event == 0x68 ? "renamed" : event == 0x60 ? "icache-stall" :
-        event == 0x61 ? "dcache-stall" : event == 0x03 ? "L1D-refill" :
-        event == 0x04 ? "L1D-access" : event == 0x01 ? "L1I-refill" :
-        event == 0x10 ? "branch-mispredict" : event == 0x12 ? "branch" : "event";
+    switch (event) {
+    case 0x00: return "sw-increment";      case 0x01: return "L1I-refill";
+    case 0x02: return "ITLB-refill";       case 0x03: return "L1D-refill";
+    case 0x04: return "L1D-access";        case 0x05: return "DTLB-refill";
+    case 0x06: return "loads";             case 0x07: return "stores";
+    case 0x09: return "exceptions";        case 0x0A: return "exception-returns";
+    case 0x0B: return "CONTEXTIDR-writes"; case 0x0C: return "PC-writes";
+    case 0x0D: return "imm-branches";      case 0x0F: return "unaligned";
+    case 0x10: return "branch-mispredict"; case 0x11: return "cycles";
+    case 0x12: return "branches";          case 0x40: return "java-bytecodes";
+    case 0x41: return "java-sw-bytecodes"; case 0x42: return "jazelle-back-branches";
+    case 0x50: return "coherent-miss";     case 0x51: return "coherent-hit";
+    case 0x60: return "icache-stall";      case 0x61: return "dcache-stall";
+    case 0x62: return "mainTLB-stall";     case 0x63: return "STREX-passed";
+    case 0x64: return "STREX-failed";      case 0x65: return "data-evictions";
+    case 0x66: return "no-dispatch";       case 0x67: return "issue-empty";
+    case 0x68: return "renamed";           case 0x6E: return "predicted-returns";
+    case 0x70: return "main-unit-insts";   case 0x71: return "second-unit-insts";
+    case 0x72: return "load-store-insts";  case 0x73: return "fp-insts";
+    case 0x74: return "neon-insts";        case 0x80: return "PLD-stall";
+    case 0x81: return "write-stall";       case 0x82: return "ITLB-main-stall";
+    case 0x83: return "DTLB-main-stall";   case 0x84: return "ITLB-micro-stall";
+    case 0x85: return "DTLB-micro-stall";  case 0x86: return "DMB-stall";
+    case 0x8A: return "int-clock-on";      case 0x8B: return "neon-clock-on";
+    case 0x90: return "ISB";               case 0x91: return "DSB";
+    case 0x92: return "DMB";               case 0x93: return "external-irqs";
+    case 0xA0: return "PLE-line-done";     case 0xA1: return "PLE-line-skipped";
+    case 0xA2: return "PLE-FIFO-flush";    case 0xA3: return "PLE-request-done";
+    case 0xA4: return "PLE-FIFO-overflow"; case 0xA5: return "PLE-programmed";
+    default: return "event";
+    }
 }
 
 void EmitTimedPlot(const char *name, uint64_t timestamp, double value) {
@@ -748,7 +776,7 @@ int vita_tracy_kernel_set_sampling_events(uint32_t frequency_hz, uint32_t flags,
                                           const uint32_t *events, uint32_t event_count) {
     if (event_count > VITA_TRACY_MAX_SAMPLE_EVENTS || (event_count && !events)) return VITA_TRACY_ERROR_ARGS;
     for (uint32_t i = 0; i < event_count; ++i)
-        if (events[i] > 0xFFu) return VITA_TRACY_ERROR_ARGS;
+        if (!vita_tracy_a9_event_valid(events[i])) return VITA_TRACY_ERROR_ARGS;
     VitaTracyLockGuard lock(&g_api_mutex);
     int ret = ReadyForCommand();
     if (ret < 0) return ret;
