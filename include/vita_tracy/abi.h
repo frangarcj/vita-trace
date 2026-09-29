@@ -6,7 +6,7 @@
 extern "C" {
 #endif
 
-#define VITA_TRACY_ABI_VERSION 4u
+#define VITA_TRACY_ABI_VERSION 5u
 
 /* Suspend/read/resume is a diagnostic, not CPU-time sampling. Never enable
  * it as an implicit fallback when an interrupt sampler is unavailable. */

@@ -12,6 +12,7 @@ add_executable(tracy_kernel
     sampler_debug_fallback.c
     sampler_irq.c
     irq_entry.S
+    user_read.c
     sampler_pamgr.c
     service.c
     tick_source.c

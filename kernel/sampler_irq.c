@@ -13,7 +13,6 @@
 #include "firmware_exports.h"
 #include "pmu_thread_ctx.h"
 #include "vita_tracy/kernel_abi.h"
-#include "vita_tracy/irq_safe.h"
 #include "vita_tracy/pmu_overflow.h"
 
 #ifndef VITA_TRACY_IRQ_CORE_MASK
@@ -50,6 +49,7 @@ typedef struct IrqCpu {
     int job_started;
     uint32_t failed;
     uint32_t admission;
+    VitaTraceSample scratch; /* one producer per core; keeps the record off the IRQ stack */
 } IrqCpu;
 
 typedef struct IrqSampler {
@@ -67,6 +67,60 @@ typedef struct IrqSampler {
 } IrqSampler;
 
 static IrqSampler g_irq;
+
+/* User stack ranges of the target's threads, written from thread context and
+ * read by the IRQ node. A thread's stack is one committed memblock (the Vita
+ * does not page on demand), so a copy inside the range cannot fault. A slot
+ * is published by writing its bounds before its tid and retired by clearing
+ * the tid first; readers re-check the tid after reading the bounds. */
+#define IRQ_STACK_SLOTS 64u
+typedef struct IrqStackRange {
+    uint32_t tid, lo, hi;
+} IrqStackRange;
+static IrqStackRange g_stacks[IRQ_STACK_SLOTS];
+
+void vita_tracy_sampler_irq_set_stack(uint32_t tid, uint32_t lo, uint32_t hi) {
+    if (!tid) {
+        for (uint32_t i = 0; i < IRQ_STACK_SLOTS; ++i) __atomic_store_n(&g_stacks[i].tid, 0u, __ATOMIC_RELEASE);
+        return;
+    }
+    uint32_t free_slot = IRQ_STACK_SLOTS;
+    for (uint32_t i = 0; i < IRQ_STACK_SLOTS; ++i) {
+        const uint32_t t = __atomic_load_n(&g_stacks[i].tid, __ATOMIC_ACQUIRE);
+        if (t == tid) {
+            if (g_stacks[i].lo == lo && g_stacks[i].hi == hi) return;
+            __atomic_store_n(&g_stacks[i].tid, 0u, __ATOMIC_RELEASE);
+            free_slot = i;
+            break;
+        }
+        if (!t && free_slot == IRQ_STACK_SLOTS) free_slot = i;
+    }
+    if (free_slot == IRQ_STACK_SLOTS || hi <= lo) return;
+    __atomic_store_n(&g_stacks[free_slot].lo, lo, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_stacks[free_slot].hi, hi, __ATOMIC_RELAXED);
+    __atomic_store_n(&g_stacks[free_slot].tid, tid, __ATOMIC_RELEASE);
+}
+
+/* Returns the words copied; sets *cut when an unreadable page ended the copy
+ * early. */
+static uint32_t copy_user_stack(uint32_t tid, uint32_t sp, uint32_t *dst, int *cut) {
+    *cut = 0;
+    for (uint32_t i = 0; i < IRQ_STACK_SLOTS; ++i) {
+        if (__atomic_load_n(&g_stacks[i].tid, __ATOMIC_ACQUIRE) != tid) continue;
+        const uint32_t lo = __atomic_load_n(&g_stacks[i].lo, __ATOMIC_RELAXED);
+        const uint32_t hi = __atomic_load_n(&g_stacks[i].hi, __ATOMIC_RELAXED);
+        if (__atomic_load_n(&g_stacks[i].tid, __ATOMIC_ACQUIRE) != tid) return 0;
+        if ((sp & 3u) || sp < lo || sp >= hi) return 0;
+        /* The ends of the range the firmware reports may not be mapped; the
+         * copy checks every page before reading it. */
+        uint32_t words = (hi - sp) / 4u;
+        if (words > VITA_TRACE_SAMPLE_STACK_WORDS) words = VITA_TRACE_SAMPLE_STACK_WORDS;
+        const uint32_t copied = vita_tracy_read_user_words(dst, sp, words);
+        *cut = copied < words;
+        return copied;
+    }
+    return 0;
+}
 
 /* The Cortex-A9 PMU overflow line reaches the GIC as SPI 244 (the devkit
  * pamgr registered it with target mask 0xF). Retail registers nothing for
@@ -138,11 +192,12 @@ static int monitor_thread(SceSize args, void *argp) {
             char tag[16];
             snprintf(tag, sizeof(tag), "t%u", (unsigned)tick);
             vita_tracy_pmu_ctx_status(st->target_pid, tag);
-            VITA_TRACY_TRACE("mon t%u c0 calls %u ovf %u kern %u adopt %u/%u/%u err %d\n", (unsigned)tick,
-                (unsigned)st->stats.sample_irq_calls[0], (unsigned)st->stats.sample_irq_overflows[0],
-                (unsigned)st->stats.sample_irq_kernel[0], (unsigned)st->stats.sample_irq_adopted[0],
-                (unsigned)st->stats.sample_irq_adopted[1], (unsigned)st->stats.sample_irq_adopted[2],
-                (int)st->stats.sample_irq_last_error);
+            VITA_TRACY_TRACE("mon t%u irq %u/%u/%u ovf %u/%u/%u emit %u/%u/%u err %d\n", (unsigned)tick,
+                (unsigned)st->stats.sample_irq_calls[0], (unsigned)st->stats.sample_irq_calls[1],
+                (unsigned)st->stats.sample_irq_calls[2], (unsigned)st->stats.sample_irq_overflows[0],
+                (unsigned)st->stats.sample_irq_overflows[1], (unsigned)st->stats.sample_irq_overflows[2],
+                (unsigned)st->stats.samples_emitted[0], (unsigned)st->stats.samples_emitted[1],
+                (unsigned)st->stats.samples_emitted[2], (int)st->stats.sample_irq_last_error);
         }
         ++tick;
         ksceKernelDelayThread(500000);
@@ -473,18 +528,22 @@ static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
     if (!__atomic_load_n(&g_irq.emit_enabled, __ATOMIC_ACQUIRE) ||
         vita_trace_control_pending(&st->control)) return;
 
-    VitaTraceSample sample;
-    vita_irq_zero(&sample, sizeof(sample));
-    sample.timestamp = vita_tracy_kernel_now();
-    sample.pid = (uint32_t)info.process_id;
-    sample.tid = (uint32_t)info.thread_id; /* Global GUID; resolved outside IRQ. */
-    sample.pc = pc;
-    sample.sp = context->sp;
-    sample.lr = context->lr;
-    sample.cpu = (uint16_t)cpu_id;
-    sample.flags = VITA_TRACE_SAMPLE_PMU_IRQ | VITA_TRACE_SAMPLE_GLOBAL_TID;
-    if (context->spsr & (1u << 5)) sample.flags |= VITA_TRACE_SAMPLE_THUMB;
-    vita_tracy_emit_sample(st, cpu_id, &sample);
+    VitaTraceSample *sample = &cpu->scratch;
+    sample->timestamp = vita_tracy_kernel_now();
+    sample->pid = (uint32_t)info.process_id;
+    sample->tid = (uint32_t)info.thread_id; /* Global GUID; resolved outside IRQ. */
+    sample->pc = pc;
+    sample->sp = context->sp;
+    sample->lr = context->lr;
+    sample->cpu = (uint16_t)cpu_id;
+    sample->flags = VITA_TRACE_SAMPLE_PMU_IRQ | VITA_TRACE_SAMPLE_GLOBAL_TID;
+    if (context->spsr & (1u << 5)) sample->flags |= VITA_TRACE_SAMPLE_THUMB;
+    sample->r7 = context->r[7];
+    sample->r11 = context->r[11];
+    int cut;
+    sample->stack_words = copy_user_stack((uint32_t)info.thread_id, context->sp, sample->stack, &cut);
+    if (cut) sample->flags |= VITA_TRACE_SAMPLE_STACK_CUT;
+    vita_tracy_emit_sample(st, cpu_id, sample);
     __atomic_fetch_or(&st->irq_pending_wake, VITA_TRACY_WAKE_DATA, __ATOMIC_RELEASE);
 }
 
@@ -597,6 +656,7 @@ int vita_tracy_sampler_irq_start(VitaTracyKernelState *st) {
     memset(&g_probe, 0, sizeof(g_probe));
     if (!(st->sampling_flags & VITA_TRACY_SAMPLING_IRQ_SKIP_PROGRAM))
         __atomic_store_n(&g_irq.adopt_enabled, 1u, __ATOMIC_RELEASE);
+    vita_tracy_sampler_irq_refresh_stacks();
     /* The firmware keeps PMU state per thread: the interrupt source only
      * fires for threads whose saved context enables the cycle counter. */
     if (!(st->sampling_flags & VITA_TRACY_SAMPLING_IRQ_COUNT_ONLY))
@@ -637,6 +697,7 @@ int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st) {
 
     __atomic_store_n(&g_irq.emit_enabled, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&g_irq.adopt_enabled, 0u, __ATOMIC_RELEASE);
+    vita_tracy_sampler_irq_set_stack(0u, 0u, 0u);
 #if defined(__vita__) && !defined(VITA_TRACY_TESTING)
     monitor_stop();
     release_pmu_intr();
@@ -685,6 +746,34 @@ int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st) {
     if (first_error && st) record_error(st, first_error);
     return first_error;
 }
+
+#if defined(__vita__) && !defined(VITA_TRACY_TESTING)
+void vita_tracy_sampler_irq_refresh_stacks(void) {
+    VitaTracyKernelState *st = g_irq.state;
+    if (!st || !__atomic_load_n(&g_irq.service_enabled, __ATOMIC_ACQUIRE)) return;
+    SceUID ids[IRQ_STACK_SLOTS];
+    int count = 0;
+    if (ksceKernelGetThreadIdList(st->target_pid, ids, IRQ_STACK_SLOTS, &count) < 0) return;
+    /* Retire threads that are gone, then (re)publish the live ones. */
+    for (uint32_t i = 0; i < IRQ_STACK_SLOTS; ++i) {
+        const uint32_t t = __atomic_load_n(&g_stacks[i].tid, __ATOMIC_ACQUIRE);
+        if (!t) continue;
+        int alive = 0;
+        for (int j = 0; j < count; ++j) alive |= (uint32_t)ids[j] == t;
+        if (!alive) __atomic_store_n(&g_stacks[i].tid, 0u, __ATOMIC_RELEASE);
+    }
+    for (int j = 0; j < count; ++j) {
+        SceKernelThreadInfo info;
+        memset(&info, 0, sizeof(info));
+        info.size = sizeof(info);
+        if (ksceKernelGetThreadInfo(ids[j], &info) < 0 || !info.stack || info.stackSize <= 0) continue;
+        const uint32_t lo = (uint32_t)(uintptr_t)info.stack;
+        vita_tracy_sampler_irq_set_stack((uint32_t)ids[j], lo, lo + (uint32_t)info.stackSize);
+    }
+}
+#else
+void vita_tracy_sampler_irq_refresh_stacks(void) {}
+#endif
 
 int vita_tracy_sampler_irq_active(void) {
     initialize();

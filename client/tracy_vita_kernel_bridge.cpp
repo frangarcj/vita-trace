@@ -17,10 +17,24 @@
 #include "vita_tracy/kernel_events.h"
 #include "vita_tracy/shared_layout.h"
 #include "vita_tracy/shared_ring.h"
+#include "vita_tracy/arm_unwind.h"
+#include "vita_tracy/stack_scan.h"
+
+#ifdef __vita__
+/* The application's own unwind tables, from the linker script. They cover
+ * code built with -funwind-tables (vita_tracy_enable() adds it). Declared at
+ * global scope: inside the anonymous namespace GCC mangles them, and the
+ * weak references silently resolve to null. */
+extern "C" const uint32_t __exidx_start[] __attribute__((weak));
+extern "C" const uint32_t __exidx_end[] __attribute__((weak));
+#endif
 
 namespace {
 
-constexpr uint32_t kDefaultSamplesPerCore = 2048;
+/* A sample carries 4 KB of user stack: 64 per core is about 1 MB of
+ * memblock for four rings. The drain empties them every 20 ms while the IRQ
+ * sampler runs, about 5 samples per core at 250 Hz. */
+constexpr uint32_t kDefaultSamplesPerCore = 64;
 constexpr uint32_t kDefaultControlCapacity = 256;
 constexpr uint32_t kBatchLimit = 256;
 enum Command { None, Sampling, Stats, PmuConfigure, PmuStart, PmuStop, Detach };
@@ -118,6 +132,54 @@ bool ResolveSampleThread(const VitaTraceSample &sample, uint32_t &tid) {
     return true;
 }
 
+/* Text segments of the application's own modules, from the kernel's module
+ * snapshot; the drain thread is the only reader and writer. System modules
+ * (mapped from 0xE0000000) are left out: whether user mode may read their
+ * code has not been checked, and a call-site check reads code. */
+constexpr uint32_t kMaxCodeRanges = 16;
+constexpr uint32_t kMaxFrames = 32;
+struct CodeRange {
+    uint32_t base;
+    uint32_t size;
+};
+CodeRange g_code[kMaxCodeRanges];
+uint32_t g_code_count = 0;
+
+void RememberCode(uint32_t base, uint32_t size) {
+    if (!size || base >= 0xE0000000u || g_code_count >= kMaxCodeRanges) return;
+    for (uint32_t i = 0; i < g_code_count; ++i)
+        if (g_code[i].base == base) return;
+    g_code[g_code_count++] = CodeRange{base, size};
+}
+
+/* The unwind image is the code range holding the application's exidx table,
+ * found once its module snapshot has arrived. */
+bool UnwindImage(VitaTraceUnwindImage &image) {
+#ifdef __vita__
+    const uint32_t start = (uint32_t)(uintptr_t)__exidx_start, end = (uint32_t)(uintptr_t)__exidx_end;
+    if (!start || end <= start) return false;
+    for (uint32_t i = 0; i < g_code_count; ++i) {
+        const CodeRange &r = g_code[i];
+        if (start < r.base || end - r.base > r.size) continue;
+        image = VitaTraceUnwindImage{(const uint8_t *)(uintptr_t)r.base, r.base, r.size, start, end};
+        return true;
+    }
+#else
+    (void)image;
+#endif
+    return false;
+}
+
+int IsReturnAddress(void *, uint32_t addr) {
+    const uint32_t a = addr & ~1u;
+    for (uint32_t i = 0; i < g_code_count; ++i) {
+        const CodeRange &r = g_code[i];
+        if (a < r.base || a - r.base > r.size) continue;
+        return vita_trace_is_call_return(addr, (const uint8_t *)(uintptr_t)r.base, r.base, r.size);
+    }
+    return 0;
+}
+
 void EmitSample(const VitaTraceSample &sample) {
 #ifdef TRACY_ON_DEMAND
     if (!tracy::GetProfiler().IsConnected()) return;
@@ -126,13 +188,21 @@ void EmitSample(const VitaTraceSample &sample) {
     if (!ResolveSampleThread(sample, thread)) return;
     int64_t time = vita_tracy_kernel_us_to_tracy_ns(&g_bridge.clock, sample.timestamp);
 
-    auto *trace = (uint64_t *)tracy::tracy_malloc(2 * sizeof(uint64_t));
+    uint32_t frames[kMaxFrames];
+    uint32_t stack_words = sample.stack_words;
+    if (stack_words > VITA_TRACE_SAMPLE_STACK_WORDS) stack_words = VITA_TRACE_SAMPLE_STACK_WORDS;
+    VitaTraceUnwindImage image{};
+    const bool have_image = UnwindImage(image);
+    const VitaTraceUnwindRegs regs{sample.pc, sample.sp, sample.lr, sample.r7, sample.r11};
+    const uint32_t depth = vita_trace_arm_unwind(have_image ? &image : nullptr, &regs, sample.stack, stack_words,
+                                                 IsReturnAddress, nullptr, frames, kMaxFrames);
+    auto *trace = (uint64_t *)tracy::tracy_malloc((1 + depth) * sizeof(uint64_t));
     if (!trace) {
         ++g_bridge.allocation_drops;
         return;
     }
-    trace[0] = 1;
-    trace[1] = sample.pc;
+    trace[0] = depth;
+    for (uint32_t i = 0; i < depth; ++i) trace[1 + i] = frames[i];
 
     TracyLfqPrepare(tracy::QueueType::CallstackSample);
     tracy::MemWrite(&item->callstackSampleFat.time, time);
@@ -147,6 +217,7 @@ void EmitControl(const VitaTraceControlRecord &record) {
         /* Module bases travel as messages so the PC-to-source mapping can
          * be rebuilt on the PC; see tools/symbol_map.py. */
         const auto &mod = record.payload.module_snapshot;
+        if (mod.segment_count) RememberCode(mod.segments[0].vaddr, mod.segments[0].memsz);
         for (uint32_t i = 0; i < mod.segment_count && i < VITA_TRACE_MODULE_MAX_SEGMENTS; ++i) {
             if (!mod.segments[i].memsz) continue;
             char buf[160];

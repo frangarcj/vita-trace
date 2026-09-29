@@ -129,3 +129,10 @@ link order and SELF/VPK generation; they do not establish hardware behavior.
 
 The `PC_SAMPLING` option explicitly selects the experimental interrupted-PC
 source. The helper never selects it or the suspend diagnostic as a fallback.
+
+`PC_SAMPLING` also compiles the executable with `-funwind-tables`, so that the
+client can rebuild each sample's callstack from `.ARM.exidx`. The flag only
+covers the executable's own sources. Add it to the application's static
+libraries as well (`target_compile_options(mylib PRIVATE -funwind-tables)`),
+or their frames are recovered by scanning the stack, which is less reliable.
+Prebuilt libraries such as newlib and vitaGL have no tables.

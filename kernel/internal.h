@@ -94,6 +94,14 @@ int vita_tracy_sampler_irq_stop(VitaTracyKernelState *st);
 int vita_tracy_sampler_irq_handler_registered(void);
 int vita_tracy_sampler_irq_active(void);
 void vita_tracy_sampler_irq_fill_diagnostics(void);
+/* Thread context: refresh the target threads' stack ranges the IRQ node may
+ * copy from. Cheap enough to call a few times a second. */
+void vita_tracy_sampler_irq_refresh_stacks(void);
+/* Record one thread's user stack range [lo, hi); tid 0 clears the table. */
+void vita_tracy_sampler_irq_set_stack(uint32_t tid, uint32_t lo, uint32_t hi);
+/* IRQ context only; see user_read.c. Returns the words copied: the copy
+ * stops at the first page a user read would fault on. */
+uint32_t vita_tracy_read_user_words(uint32_t *dst, uint32_t user_src, uint32_t words);
 
 int vita_tracy_pmu_configure(VitaTracyKernelState *st, const VitaTracyPmuConfig *cfg);
 

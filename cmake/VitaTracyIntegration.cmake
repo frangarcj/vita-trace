@@ -62,6 +62,13 @@ function(vita_tracy_enable target)
     # the 3.60 console (2026-09-22), so attach is gated on a marker file.
     target_link_libraries("${target}" PRIVATE tracy_vita)
     target_compile_options("${target}" PRIVATE -g)
+    # Unwind tables let the client rebuild sampled callstacks. They cover only
+    # code compiled with this flag: add it to the target's own libraries too.
+    # The link option keeps it for code generated at link time under LTO.
+    if(VT_PC_SAMPLING)
+        target_compile_options("${target}" PRIVATE -funwind-tables)
+        target_link_options("${target}" PRIVATE -funwind-tables)
+    endif()
     if(VT_FRAMES)
         target_link_options("${target}" PRIVATE "-Wl,--wrap=sceDisplaySetFrameBuf")
         target_link_libraries("${target}" PRIVATE SceDisplay_stub)

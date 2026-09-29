@@ -148,6 +148,16 @@ int vitaTracyWaitForData(uint32_t timeout_us) {
          * without a timeout kept its process from dying, and the proc-event
          * callback that would wake it only runs once the threads are gone,
          * so killing the app hung SceShell (2026-09-22 and 2026-09-28). */
+        /* The IRQ node copies user stacks only inside ranges published here,
+         * from the target's own drain thread, a few times a second. */
+        static uint64_t stacks_refreshed_us;
+        if (vita_tracy_sampler_irq_active()) {
+            const uint64_t now_us = (uint64_t)ksceKernelGetSystemTimeWide();
+            if (now_us - stacks_refreshed_us >= 250000u) {
+                vita_tracy_sampler_irq_refresh_stacks();
+                stacks_refreshed_us = now_us;
+            }
+        }
         const uint32_t poll_us = vita_tracy_sampler_irq_active() ? 20000u : 250000u;
         SceUInt timeout = (!timeout_us || timeout_us > poll_us) ? poll_us : timeout_us;
         ret = ksceKernelWaitEventFlag(st->data_event, VITA_TRACY_WAKE_ALL,

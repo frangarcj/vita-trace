@@ -22,6 +22,10 @@ add_executable(vita_tracy_tests
     timebase_test.cpp
     thread_registry_test.cpp
     client_lock_test.cpp
+    stack_scan_test.cpp
+    arm_unwind_test.cpp
+    ${VITA_TRACY_SOURCE_DIR}/common/arm_unwind.c
+    ${VITA_TRACY_SOURCE_DIR}/common/stack_scan.c
     ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c
     ${VITA_TRACY_SOURCE_DIR}/common/pmu_core.c
     ${VITA_TRACY_SOURCE_DIR}/common/pmu_overflow.c
@@ -176,6 +180,8 @@ add_executable(vita_tracy_bridge_tests
     main.cpp bridge_failure_test.cpp
     ${VITA_TRACY_SOURCE_DIR}/client/tracy_vita_kernel_bridge.cpp
     ${VITA_TRACY_SOURCE_DIR}/client/clock_sync.c
+    ${VITA_TRACY_SOURCE_DIR}/common/arm_unwind.c
+    ${VITA_TRACY_SOURCE_DIR}/common/stack_scan.c
     ${VITA_TRACY_SOURCE_DIR}/common/shared_layout.c
     ${VITA_TRACY_SOURCE_DIR}/common/shared_ring.c
     ${VITA_TRACY_SOURCE_DIR}/common/thread_registry.c

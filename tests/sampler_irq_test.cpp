@@ -24,6 +24,7 @@ extern "C" {
 
 void vita_tracy_irq_handler_c(const VitaTracyIrqFrame *context);
 void vita_tracy_sampler_irq_test_reset(void);
+void vita_tracy_sampler_irq_set_stack(uint32_t tid, uint32_t lo, uint32_t hi);
 }
 
 namespace {
@@ -232,6 +233,14 @@ void vita_tracy_emit_sample(VitaTracyKernelState *st, uint32_t cpu, const VitaTr
         ++st->stats.samples_emitted[cpu];
     else
         ++st->stats.samples_dropped[cpu];
+}
+
+// User memory as the IRQ node would see it: each word holds its own address,
+// and nothing at or above 0x83001000 is mapped.
+uint32_t vita_tracy_read_user_words(uint32_t *dst, uint32_t user_src, uint32_t words) {
+    uint32_t i = 0;
+    for (; i < words && user_src + 4u * i < 0x83001000u; ++i) dst[i] = user_src + 4u * i;
+    return i;
 }
 
 void vita_tracy_notify(VitaTracyKernelState *) { ++fake.notifications; }
@@ -624,4 +633,54 @@ TEST_CASE_FIXTURE(Fixture, "IRQ node does not adopt threads when context program
     fake.core = 0;
     CHECK(fake.banks[1].enable == 0);
     CHECK(state.stats.sample_irq_adopted[1] == 0);
+}
+
+TEST_CASE_FIXTURE(Fixture, "IRQ samples carry the user stack only inside a published range") {
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    VitaTracyIrqFrame context{};
+    context.spsr = 0x10u;
+    context.irq_lr = 0x81234000u + 4u;
+    context.sp = 0x83000F80u;
+    VitaTraceSample sample{};
+
+    overflow(0, context); /* no range for thread 0x500 yet */
+    REQUIRE(vita_trace_ring_try_pop(vita_trace_shared_core_ring(memory.data(), 0), &sample));
+    CHECK(sample.stack_words == 0);
+
+    vita_tracy_sampler_irq_set_stack(0x500u, 0x83000000u, 0x83001000u);
+    overflow(0, context); /* 0x80 bytes to the top: 32 words */
+    REQUIRE(vita_trace_ring_try_pop(vita_trace_shared_core_ring(memory.data(), 0), &sample));
+    CHECK(sample.stack_words == 32);
+    CHECK((sample.flags & VITA_TRACE_SAMPLE_STACK_CUT) == 0);
+    CHECK(sample.stack[0] == 0x83000F80u);
+    CHECK(sample.stack[31] == 0x83000FFCu);
+
+    context.sp = 0x83000000u; /* the whole 4 KB range: capped, not cut */
+    overflow(0, context);
+    REQUIRE(vita_trace_ring_try_pop(vita_trace_shared_core_ring(memory.data(), 0), &sample));
+    CHECK(sample.stack_words == VITA_TRACE_SAMPLE_STACK_WORDS);
+    CHECK((sample.flags & VITA_TRACE_SAMPLE_STACK_CUT) == 0);
+
+    vita_tracy_sampler_irq_set_stack(0x500u, 0x83000000u, 0x83002000u);
+    context.sp = 0x83000F80u; /* the range runs past the last mapped page */
+    context.r[7] = 0x83000F90u;
+    context.r[11] = 0x1234u;
+    overflow(0, context);
+    REQUIRE(vita_trace_ring_try_pop(vita_trace_shared_core_ring(memory.data(), 0), &sample));
+    CHECK(sample.stack_words == 32);
+    CHECK((sample.flags & VITA_TRACE_SAMPLE_STACK_CUT) != 0);
+    CHECK(sample.r7 == 0x83000F90u);
+    CHECK(sample.r11 == 0x1234u);
+
+    context.sp = 0x84000000u; /* outside the range */
+    overflow(0, context);
+    REQUIRE(vita_trace_ring_try_pop(vita_trace_shared_core_ring(memory.data(), 0), &sample));
+    CHECK(sample.stack_words == 0);
+
+    REQUIRE(vita_tracy_sampler_irq_stop(&state) == 0); /* stop forgets the ranges */
+    REQUIRE(vita_tracy_sampler_irq_start(&state) == 0);
+    context.sp = 0x83000F80u;
+    overflow(0, context);
+    REQUIRE(vita_trace_ring_try_pop(vita_trace_shared_core_ring(memory.data(), 0), &sample));
+    CHECK(sample.stack_words == 0);
 }
