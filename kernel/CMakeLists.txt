@@ -32,6 +32,9 @@ target_include_directories(tracy_kernel PRIVATE
 target_compile_options(tracy_kernel PRIVATE
     -Wall -Wextra -O2 -fno-builtin
     -mgeneral-regs-only -fno-tree-vectorize -fno-tree-slp-vectorize
+    # Code on the raw IRQ path must not reach SceSysclib's memcpy/memset, which
+    # use d0-d3 (the interrupted thread's VFP state): no loop-to-memcpy idioms.
+    -fno-tree-loop-distribute-patterns
 )
 
 # Start hardware bring-up on one CPU without editing the backend or its ABI.

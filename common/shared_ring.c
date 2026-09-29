@@ -1,4 +1,5 @@
 #include "vita_tracy/shared_ring.h"
+#include "vita_tracy/irq_safe.h"
 
 #include <string.h>
 
@@ -46,6 +47,10 @@ int vita_trace_ring_init(void *mem, size_t mem_size, uint32_t capacity, uint32_t
     return 1;
 }
 
+/* The kernel pushes from its raw IRQ node, where the kernel's memcpy would
+ * clobber the interrupted thread's VFP registers; that corrupted a thread's
+ * float state on the console (geometrizer's radix sort then wrote out of
+ * bounds). See irq_safe.h. */
 int vita_trace_ring_try_push(void *mem, const void *element) {
     VitaTraceRingHeader *hdr = header_of(mem);
     uint32_t write_pos = __atomic_load_n(&hdr->write_pos, __ATOMIC_RELAXED);
@@ -57,7 +62,7 @@ int vita_trace_ring_try_push(void *mem, const void *element) {
     }
 
     uint32_t index = write_pos & hdr->capacity_mask;
-    memcpy(records_of(mem) + (size_t)index * hdr->element_size, element, hdr->element_size);
+    vita_irq_copy(records_of(mem) + (size_t)index * hdr->element_size, element, hdr->element_size);
     __atomic_store_n(&hdr->write_pos, write_pos + 1u, __ATOMIC_RELEASE);
     return 1;
 }

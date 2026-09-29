@@ -1,4 +1,5 @@
 #include "vita_tracy/pmu_core.h"
+#include "vita_tracy/irq_safe.h"
 #include <string.h>
 
 #define PMCR_RESETS 6u
@@ -76,7 +77,7 @@ int vita_pmu_read(VitaPmuCore *core, const VitaPmuIo *io, uint64_t now, VitaPmuD
         values[i + 1] = read_reg(io, VITA_PMU_VALUE);
     }
     write_reg(io, VITA_PMU_SELR, selector);
-    memset(delta, 0, sizeof(*delta));
+    vita_irq_zero(delta, sizeof(*delta)); /* systimer callback context */
     delta->timestamp = now;
     int result = core->have_previous != 0;
     if (result) {
@@ -90,7 +91,7 @@ int vita_pmu_read(VitaPmuCore *core, const VitaPmuIo *io, uint64_t now, VitaPmuD
                 delta->values[i] = values[i + 1] - core->previous[i + 1];
         }
     }
-    memcpy(core->previous, values, sizeof(values));
+    vita_irq_copy(core->previous, values, sizeof(values));
     core->previous_time = now;
     core->have_previous = 1;
     return result;

@@ -2,6 +2,7 @@
 #include <psp2kern/kernel/sysclib.h>
 #include <psp2kern/kernel/threadmgr.h>
 #include "internal.h"
+#include "vita_tracy/irq_safe.h"
 #include "vita_tracy/kernel_abi.h"
 #include "vita_tracy/pmu_core.h"
 #include "vita_tracy/shared_layout.h"
@@ -84,7 +85,7 @@ static void on_pmu_tick(void *context) {
     }
     if (!ret) return; // First callback establishes an actual baseline.
     VitaTracePmuSample sample;
-    memset(&sample, 0, sizeof(sample));
+    vita_irq_zero(&sample, sizeof(sample));
     sample.timestamp = delta.timestamp;
     sample.elapsed_us = delta.elapsed_us;
     sample.sequence = ++cpu->sequence;

@@ -13,6 +13,7 @@
 #include "firmware_exports.h"
 #include "pmu_thread_ctx.h"
 #include "vita_tracy/kernel_abi.h"
+#include "vita_tracy/irq_safe.h"
 #include "vita_tracy/pmu_overflow.h"
 
 #ifndef VITA_TRACY_IRQ_CORE_MASK
@@ -473,7 +474,7 @@ static void handle_irq(uint32_t cpu_id, const VitaTracyIrqFrame *context) {
         vita_trace_control_pending(&st->control)) return;
 
     VitaTraceSample sample;
-    memset(&sample, 0, sizeof(sample));
+    vita_irq_zero(&sample, sizeof(sample));
     sample.timestamp = vita_tracy_kernel_now();
     sample.pid = (uint32_t)info.process_id;
     sample.tid = (uint32_t)info.thread_id; /* Global GUID; resolved outside IRQ. */
