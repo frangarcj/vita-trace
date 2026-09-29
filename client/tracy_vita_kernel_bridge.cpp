@@ -1,6 +1,7 @@
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/power.h>
 
 #include <string.h>
 #include <stdio.h>
@@ -52,6 +53,7 @@ struct Bridge {
     bool command_pending = false; // Only accessed under g_api_mutex.
     uint32_t requested_hz = 0;
     uint32_t requested_flags = 0;
+    uint32_t sampling_hz = 0; // Rate the kernel accepted; drain thread only.
     VitaTracyStats requested_stats{};
     VitaTracyPmuConfig requested_pmu{};
     VitaTracyClockSync clock{};
@@ -348,6 +350,16 @@ void EmitSamplerStats() {
         TracyPlot(names[cpu][4], (int64_t)stats.sample_irq_not_target[cpu]);
         TracyPlot(names[cpu][5], (int64_t)stats.sample_irq_adopted[cpu]);
     }
+    /* The IRQ sampler fixes its period in cycles from the clock it reads on
+     * start. A later change (PSVshell, the game's own clock calls) changes
+     * how much CPU time one sample stands for, so turning sample counts into
+     * milliseconds needs the clock over the whole capture. */
+    const int mhz = scePowerGetArmClockFrequency();
+    if (mhz <= 0) return;
+    TracyPlot("vita-tracy ARM MHz", (int64_t)mhz);
+    if (stats.sample_irq_arm_mhz && g_bridge.sampling_hz)
+        TracyPlot("vita-tracy CPU us per sample",
+                  1e6 * stats.sample_irq_arm_mhz / ((double)g_bridge.sampling_hz * mhz));
 }
 
 int DrainThread(SceSize args, void *argp) {
@@ -365,6 +377,7 @@ int DrainThread(SceSize args, void *argp) {
                 cfg.frequency_hz = g_bridge.requested_hz;
                 cfg.flags = g_bridge.requested_flags;
                 result = vitaTracySetSampling(&cfg);
+                if (result == 0) g_bridge.sampling_hz = cfg.frequency_hz;
                 if (result == 0 && cfg.frequency_hz && (cfg.flags & VITA_TRACY_SAMPLING_ALLOW_SUSPEND)) {
                     const char *warning = "vita-tracy: intrusive suspend diagnostics; not CPU-time samples";
                     TracyAppInfo(warning, strlen(warning));
@@ -387,6 +400,7 @@ int DrainThread(SceSize args, void *argp) {
                 result = vitaTracyUnregister((uint32_t)sceKernelGetProcessId());
                 if (result == 0) {
                     while (DrainBatch()) {}
+                    g_bridge.sampling_hz = 0;
                     g_bridge.draining.store(false, std::memory_order_release);
                 }
             }

@@ -91,6 +91,7 @@ target_link_libraries(tracy_vita PUBLIC
     SceNet_stub
     SceNetCtl_stub
     SceSysmodule_stub
+    ScePower_stub
     pthread
 )
 
