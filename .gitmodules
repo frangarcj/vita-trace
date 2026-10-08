@@ -1,3 +1,4 @@
 [submodule "third_party/tracy"]
 	path = third_party/tracy
-	url = https://github.com/wolfpld/tracy
+	url = https://github.com/frangarcj/tracy
+	branch = vita-port
